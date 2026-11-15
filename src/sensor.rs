@@ -7,6 +7,7 @@
 /// A source may leave axes the overlay does not consume at zero rather than
 /// pay to read them; see the `iio` module.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
 pub struct MotionSample {
     pub ax: f32,
     pub ay: f32,

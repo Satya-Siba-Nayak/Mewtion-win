@@ -846,14 +846,20 @@ impl SettingsApp {
             )
             .width(Length::Fill),
             row![
-                checkbox("Invert Lateral (X)", self.invert_x).on_toggle(Message::InvertXChanged),
-                checkbox("Invert Forward (Y)", self.invert_y).on_toggle(Message::InvertYChanged),
+                checkbox(self.invert_x)
+                    .label("Invert Lateral (X)")
+                    .on_toggle(Message::InvertXChanged),
+                checkbox(self.invert_y)
+                    .label("Invert Forward (Y)")
+                    .on_toggle(Message::InvertYChanged),
             ]
             .spacing(16),
             text("Diagnostics & System").size(13).color(UI_FG_MUTED),
-            checkbox("Simulate Motion (Desk Test Mode)", self.simulate_motion)
+            checkbox(self.simulate_motion)
+                .label("Simulate Motion (Desk Test Mode)")
                 .on_toggle(Message::SimulateMotionChanged),
-            checkbox("Run Mewtion on Windows Startup", self.autostart_windows)
+            checkbox(self.autostart_windows)
+                .label("Run Mewtion on Windows Startup")
                 .on_toggle(Message::AutostartChanged),
             save_btn,
             text(&self.status_message).size(12).color(COLOR_GREEN),

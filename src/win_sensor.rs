@@ -22,9 +22,6 @@ const G_TO_MPS2: f32 = 9.80665;
 /// and vehicle motion has no content above these frequencies.
 const MAX_POLL_HZ: f32 = 100.0;
 
-/// Default loop frequency if the sensor does not report an interval.
-const DEFAULT_POLL_HZ: f32 = 60.0;
-
 /// Cutoff of the gravity estimator (0.25 Hz). Low enough to pass sustained
 /// device tilt/orientation while rejecting vehicle linear acceleration.
 const GRAVITY_CUTOFF_HZ: f32 = 0.25;
@@ -173,7 +170,6 @@ pub fn run_win_sensor_blocking<F>(_source: WinSensorSource, _on_sample: F)
 where
     F: FnMut(MotionSample),
 {
-    let _ = DEFAULT_POLL_HZ;
     let _ = G_TO_MPS2;
     let _ = MAX_POLL_HZ;
     let _ = GRAVITY_CUTOFF_HZ;
