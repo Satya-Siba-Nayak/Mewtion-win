@@ -103,7 +103,14 @@ impl DotView {
     }
 
     /// Rasterizes anti-aliased circles for `dots` and pushes the updated layer to `hwnd`.
-    pub fn render(&mut self, hwnd: HWND, color: (f32, f32, f32), dots: &[Dot]) {
+    pub fn render(
+        &mut self,
+        hwnd: HWND,
+        dst_x: i32,
+        dst_y: i32,
+        color: (f32, f32, f32),
+        dots: &[Dot],
+    ) {
         let w = self.width;
         let h = self.height;
         let stride = w as usize;
@@ -207,7 +214,7 @@ impl DotView {
         // 3. Push the updated premultiplied ARGB surface to the Win32 layered window.
         unsafe {
             let screen_dc = GetDC(HWND::default());
-            let dst_pt = POINT { x: 0, y: 0 };
+            let dst_pt = POINT { x: dst_x, y: dst_y };
             let src_pt = POINT { x: 0, y: 0 };
             let size = SIZE { cx: w, cy: h };
             let blend = BLENDFUNCTION {

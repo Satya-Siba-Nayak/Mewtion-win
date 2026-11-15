@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use iced::widget::{
-    button, column, container, pick_list, row, scrollable, slider, text, text_input,
+    button, checkbox, column, container, pick_list, row, scrollable, slider, text, text_input,
 };
 use iced::{Alignment, Color, Element, Length, Task};
 use std::fs;
@@ -19,7 +19,7 @@ pub fn main() -> iced::Result {
 
     iced::application(SettingsApp::default, SettingsApp::update, SettingsApp::view)
         .title("Mewtion Settings")
-        .window_size((390.0, 760.0))
+        .window_size((420.0, 860.0))
         .centered()
         .run()
 }
@@ -58,6 +58,24 @@ fn resolve_config_path() -> PathBuf {
         }
     }
     cwd_path
+}
+
+fn resolve_status_path() -> PathBuf {
+    let cfg = resolve_config_path();
+    if let Some(parent) = cfg.parent() {
+        if !parent.as_os_str().is_empty() {
+            return parent.join("mewtion_status.txt");
+        }
+    }
+    PathBuf::from("mewtion_status.txt")
+}
+
+fn read_sensor_status() -> String {
+    fs::read_to_string(resolve_status_path())
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Overlay initializing...".to_string())
 }
 
 fn new_silent_command(program: &str) -> Command {
@@ -99,12 +117,10 @@ fn find_overlay_exe() -> Option<PathBuf> {
 }
 
 fn ensure_adb_and_overlay_started() {
-    // 1. Best-effort ADB port forward if an Android USB device is attached
     let _ = new_silent_command("adb")
         .args(["forward", "tcp:8765", "tcp:8765"])
         .output();
 
-    // 2. If Mewtion.exe sits alongside control_panel.exe and isn't running yet, launch it
     if !is_overlay_running() {
         if let Some(overlay_path) = find_overlay_exe() {
             let _ = new_silent_command(overlay_path.to_str().unwrap_or("Mewtion.exe")).spawn();
@@ -112,8 +128,59 @@ fn ensure_adb_and_overlay_started() {
     }
 }
 
+fn is_autostart_enabled() -> bool {
+    if let Ok(output) = new_silent_command("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "Mewtion",
+        ])
+        .output()
+    {
+        return output.status.success();
+    }
+    false
+}
+
+fn set_autostart_enabled(enabled: bool) -> bool {
+    if enabled {
+        let Some(overlay_path) = find_overlay_exe() else {
+            return false;
+        };
+        let canonical = fs::canonicalize(&overlay_path).unwrap_or(overlay_path);
+        let value = format!("\"{}\"", canonical.display());
+        new_silent_command("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Mewtion",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &value,
+                "/f",
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else {
+        new_silent_command("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "Mewtion",
+                "/f",
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
 fn detect_windows_gateway_ip() -> Option<String> {
-    // Method 1: PowerShell Get-NetRoute for the active default IPv4 gateway
     if let Ok(output) = new_silent_command("powershell")
         .args([
             "-NoProfile",
@@ -129,7 +196,6 @@ fn detect_windows_gateway_ip() -> Option<String> {
         }
     }
 
-    // Method 2: Fallback to parsing `ipconfig` output for "Default Gateway"
     if let Ok(output) = new_silent_command("ipconfig").output() {
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
@@ -243,6 +309,79 @@ impl std::fmt::Display for AnimMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorTarget {
+    Primary,
+    All,
+}
+impl MonitorTarget {
+    fn config_str(&self) -> &'static str {
+        match self {
+            MonitorTarget::Primary => "Primary",
+            MonitorTarget::All => "All",
+        }
+    }
+    fn from_str(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("All") {
+            MonitorTarget::All
+        } else {
+            MonitorTarget::Primary
+        }
+    }
+}
+impl std::fmt::Display for MonitorTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                MonitorTarget::Primary => "Primary Monitor Only",
+                MonitorTarget::All => "All Monitors (Virtual Desktop)",
+            }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Orientation {
+    Deg0,
+    Deg90,
+    Deg180,
+    Deg270,
+}
+impl Orientation {
+    fn degrees(&self) -> i32 {
+        match self {
+            Orientation::Deg0 => 0,
+            Orientation::Deg90 => 90,
+            Orientation::Deg180 => 180,
+            Orientation::Deg270 => 270,
+        }
+    }
+    fn from_degrees(deg: i32) -> Self {
+        match deg.rem_euclid(360) {
+            90 => Orientation::Deg90,
+            180 => Orientation::Deg180,
+            270 => Orientation::Deg270,
+            _ => Orientation::Deg0,
+        }
+    }
+}
+impl std::fmt::Display for Orientation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Orientation::Deg0 => "0° (Standard / Flat)",
+                Orientation::Deg90 => "90° (Landscape Right)",
+                Orientation::Deg180 => "180° (Inverted)",
+                Orientation::Deg270 => "270° (Landscape Left)",
+            }
+        )
+    }
+}
+
 struct SettingsApp {
     selected_size: DotSize,
     selected_color: DotColor,
@@ -250,8 +389,15 @@ struct SettingsApp {
     margin_pct: f32,
     sensitivity: f32,
     anim_mode: AnimMode,
+    monitor_target: MonitorTarget,
+    orientation: Orientation,
+    invert_x: bool,
+    invert_y: bool,
+    simulate_motion: bool,
+    autostart_windows: bool,
     phone_ip: String,
     overlay_running: bool,
+    sensor_status: String,
     status_message: String,
 }
 
@@ -265,8 +411,15 @@ impl Default for SettingsApp {
             margin_pct: 0.03,
             sensitivity: 3.5,
             anim_mode: AnimMode::Fluid,
+            monitor_target: MonitorTarget::Primary,
+            orientation: Orientation::Deg0,
+            invert_x: false,
+            invert_y: false,
+            simulate_motion: false,
+            autostart_windows: is_autostart_enabled(),
             phone_ip: "127.0.0.1".to_string(),
             overlay_running: is_overlay_running(),
+            sensor_status: read_sensor_status(),
             status_message: String::new(),
         };
 
@@ -306,6 +459,15 @@ impl Default for SettingsApp {
                             AnimMode::Fluid
                         };
                     }
+                    "monitor" => app.monitor_target = MonitorTarget::from_str(v),
+                    "orientation" => {
+                        if let Ok(val) = v.parse::<i32>() {
+                            app.orientation = Orientation::from_degrees(val);
+                        }
+                    }
+                    "invert_x" => app.invert_x = matches!(v, "true" | "1" | "yes"),
+                    "invert_y" => app.invert_y = matches!(v, "true" | "1" | "yes"),
+                    "simulate" => app.simulate_motion = matches!(v, "true" | "1" | "yes"),
                     "ip" => app.phone_ip = v.to_string(),
                     _ => {}
                 }
@@ -323,15 +485,47 @@ pub enum Message {
     MarginChanged(f32),
     SensitivityChanged(f32),
     AnimModeChanged(AnimMode),
+    MonitorTargetChanged(MonitorTarget),
+    OrientationChanged(Orientation),
+    InvertXChanged(bool),
+    InvertYChanged(bool),
+    SimulateMotionChanged(bool),
+    AutostartChanged(bool),
     IpChanged(String),
     SetUsbMode,
     AutoDetectHotspot,
+    RefreshStatus,
     ToggleOverlay,
     SaveClicked,
 }
 
 impl SettingsApp {
+    fn write_config(&self) -> Result<(), std::io::Error> {
+        let config_data = format!(
+            "size={}\ncolor={}\nopacity={}\nmargin={}\nsensitivity={}\nanimation={}\nip={}\nmonitor={}\norientation={}\ninvert_x={}\ninvert_y={}\nsimulate={}\n",
+            self.selected_size.pixels(),
+            self.selected_color.hex_string(),
+            self.opacity,
+            self.margin_pct,
+            self.sensitivity,
+            match self.anim_mode {
+                AnimMode::Fluid => "Fluid",
+                AnimMode::Rigid => "Rigid",
+            },
+            self.phone_ip,
+            self.monitor_target.config_str(),
+            self.orientation.degrees(),
+            self.invert_x,
+            self.invert_y,
+            self.simulate_motion,
+        );
+        fs::write(resolve_config_path(), config_data)
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
+        self.overlay_running = is_overlay_running();
+        self.sensor_status = read_sensor_status();
+
         match message {
             Message::SizeSelected(size) => self.selected_size = size,
             Message::ColorSelected(color) => self.selected_color = color,
@@ -339,6 +533,31 @@ impl SettingsApp {
             Message::MarginChanged(val) => self.margin_pct = val,
             Message::SensitivityChanged(val) => self.sensitivity = val,
             Message::AnimModeChanged(mode) => self.anim_mode = mode,
+            Message::MonitorTargetChanged(target) => self.monitor_target = target,
+            Message::OrientationChanged(orient) => self.orientation = orient,
+            Message::InvertXChanged(val) => self.invert_x = val,
+            Message::InvertYChanged(val) => self.invert_y = val,
+            Message::SimulateMotionChanged(val) => {
+                self.simulate_motion = val;
+                let _ = self.write_config();
+                self.status_message = if val {
+                    "Simulate Motion ON (testing dots at desk)".to_string()
+                } else {
+                    "Simulate Motion OFF (using live sensor)".to_string()
+                };
+            }
+            Message::AutostartChanged(val) => {
+                if set_autostart_enabled(val) {
+                    self.autostart_windows = val;
+                    self.status_message = if val {
+                        "Enabled Run on Windows Startup!".to_string()
+                    } else {
+                        "Removed from Windows Startup.".to_string()
+                    };
+                } else {
+                    self.status_message = "Could not update Windows Startup registry.".to_string();
+                }
+            }
             Message::IpChanged(ip) => self.phone_ip = ip,
             Message::SetUsbMode => {
                 self.phone_ip = "127.0.0.1".to_string();
@@ -356,6 +575,11 @@ impl SettingsApp {
                     self.status_message = "Could not detect default gateway.".to_string();
                 }
             },
+            Message::RefreshStatus => {
+                self.overlay_running = is_overlay_running();
+                self.sensor_status = read_sensor_status();
+                self.status_message = "Status refreshed.".to_string();
+            }
             Message::ToggleOverlay => {
                 if is_overlay_running() {
                     let _ = new_silent_command("taskkill")
@@ -378,26 +602,10 @@ impl SettingsApp {
                     self.status_message = "Mewtion.exe not found next to control_panel.exe".to_string();
                 }
             }
-            Message::SaveClicked => {
-                let config_data = format!(
-                    "size={}\ncolor={}\nopacity={}\nmargin={}\nsensitivity={}\nanimation={}\nip={}\n",
-                    self.selected_size.pixels(),
-                    self.selected_color.hex_string(),
-                    self.opacity,
-                    self.margin_pct,
-                    self.sensitivity,
-                    match self.anim_mode {
-                        AnimMode::Fluid => "Fluid",
-                        AnimMode::Rigid => "Rigid",
-                    },
-                    self.phone_ip
-                );
-                let cfg_path = resolve_config_path();
-                match fs::write(cfg_path, config_data) {
-                    Ok(_) => self.status_message = "Settings applied live!".to_string(),
-                    Err(_) => self.status_message = "Error saving config".to_string(),
-                }
-            }
+            Message::SaveClicked => match self.write_config() {
+                Ok(_) => self.status_message = "Settings applied live!".to_string(),
+                Err(_) => self.status_message = "Error saving config".to_string(),
+            },
         }
         Task::none()
     }
@@ -427,8 +635,59 @@ impl SettingsApp {
                 ..Default::default()
             });
 
-        let header_row = row![title, container(toggle_btn).align_x(Alignment::End).width(Length::Fill)]
-            .align_y(Alignment::Center);
+        let header_row =
+            row![title, container(toggle_btn).align_x(Alignment::End).width(Length::Fill)]
+                .align_y(Alignment::Center);
+
+        let status_color = if !self.overlay_running {
+            COLOR_RED
+        } else if self.sensor_status.starts_with("Active:")
+            || self.sensor_status.starts_with("Connected")
+        {
+            COLOR_GREEN
+        } else {
+            COLOR_YELLOW
+        };
+
+        let status_label = if self.overlay_running {
+            &self.sensor_status
+        } else {
+            "Overlay is stopped"
+        };
+
+        let refresh_btn = button(text("Refresh").size(11).color(UI_FG_TEXT))
+            .on_press(Message::RefreshStatus)
+            .padding([4, 8])
+            .style(move |_theme, _status| button::Style {
+                background: Some(UI_BG_MAIN.into()),
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
+        let status_banner = container(
+            row![
+                text(status_label)
+                    .size(12)
+                    .color(status_color)
+                    .width(Length::Fill),
+                refresh_btn
+            ]
+            .align_y(Alignment::Center)
+            .spacing(8),
+        )
+        .padding(10)
+        .width(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(UI_BG_CARD.into()),
+            border: iced::Border {
+                radius: 6.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
         let preview_size = self.selected_size.pixels();
         let preview_dot = container(text(""))
@@ -451,7 +710,7 @@ impl SettingsApp {
 
         let preview_area = container(preview_dot)
             .width(Length::Fill)
-            .height(Length::Fixed(70.0))
+            .height(Length::Fixed(64.0))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .style(|_| container::Style {
@@ -536,6 +795,8 @@ impl SettingsApp {
 
         let content = column![
             header_row,
+            text("Sensor & Connection Status").size(13).color(UI_FG_MUTED),
+            status_banner,
             text("Live Preview").size(13).color(UI_FG_MUTED),
             preview_area,
             text("Connection Target").size(13).color(UI_FG_MUTED),
@@ -563,12 +824,43 @@ impl SettingsApp {
                 Message::AnimModeChanged
             )
             .width(Length::Fill),
+            text("Display Target").size(13).color(UI_FG_MUTED),
+            pick_list(
+                &[MonitorTarget::Primary, MonitorTarget::All][..],
+                Some(self.monitor_target),
+                Message::MonitorTargetChanged
+            )
+            .width(Length::Fill),
+            text("Sensor Orientation & Calibration")
+                .size(13)
+                .color(UI_FG_MUTED),
+            pick_list(
+                &[
+                    Orientation::Deg0,
+                    Orientation::Deg90,
+                    Orientation::Deg180,
+                    Orientation::Deg270
+                ][..],
+                Some(self.orientation),
+                Message::OrientationChanged
+            )
+            .width(Length::Fill),
+            row![
+                checkbox("Invert Lateral (X)", self.invert_x).on_toggle(Message::InvertXChanged),
+                checkbox("Invert Forward (Y)", self.invert_y).on_toggle(Message::InvertYChanged),
+            ]
+            .spacing(16),
+            text("Diagnostics & System").size(13).color(UI_FG_MUTED),
+            checkbox("Simulate Motion (Desk Test Mode)", self.simulate_motion)
+                .on_toggle(Message::SimulateMotionChanged),
+            checkbox("Run Mewtion on Windows Startup", self.autostart_windows)
+                .on_toggle(Message::AutostartChanged),
             save_btn,
             text(&self.status_message).size(12).color(COLOR_GREEN),
         ]
-        .spacing(16)
+        .spacing(14)
         .padding(24)
-        .max_width(390);
+        .max_width(420);
 
         container(scrollable(content))
             .width(Length::Fill)

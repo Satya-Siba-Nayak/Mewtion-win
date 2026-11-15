@@ -10,6 +10,7 @@ use config::MewtionConfig;
 #[cfg(windows)]
 use dotview::DotView;
 use sensor::MotionSample;
+use std::fs;
 use std::sync::{Arc, Mutex};
 
 struct Rng {
@@ -45,6 +46,7 @@ struct AppState {
     rng: Rng,
     config: MewtionConfig,
     tick_count: u32,
+    paused: bool,
 }
 
 impl AppState {
@@ -58,6 +60,7 @@ impl AppState {
             rng: Rng::new(),
             config,
             tick_count: 0,
+            paused: false,
         }
     }
 
@@ -83,6 +86,9 @@ impl AppState {
         let current_sens = (self.config.sensitivity as f32).max(0.1);
 
         while let Ok(sample) = receiver.try_recv() {
+            if self.config.simulate_motion {
+                continue;
+            }
             // Clamp tiny sensor fluctuations to exactly 0.0 to prevent drifting
             // when the device or phone is completely still on a table.
             let mut ax = sample.ax;
@@ -99,11 +105,28 @@ impl AppState {
                 gz = 0.0;
             }
 
-            let combined_lateral = (ax / current_sens) + (gz * GYRO_YAW_WEIGHT);
-            let combined_forward = ay / current_sens;
+            let (tx, ty) = self.config.transform_axes(ax, ay);
+
+            let combined_lateral = (tx / current_sens) + (gz * GYRO_YAW_WEIGHT);
+            let combined_forward = ty / current_sens;
 
             self.target_x = (combined_lateral as f64).clamp(-1.0, 1.0);
             self.target_y = (combined_forward as f64).clamp(-1.0, 1.0);
+        }
+
+        if self.config.simulate_motion {
+            // Smooth figure-8 synthetic vehicle motion so users can test at a desk
+            let t = (self.tick_count as f64) * 0.04;
+            let sim_ax = (t.sin() * 2.2) as f32;
+            let sim_ay = ((t * 0.5).cos() * 1.8) as f32;
+            let (tx, ty) = self.config.transform_axes(sim_ax, sim_ay);
+            self.target_x = ((tx / current_sens) as f64).clamp(-1.0, 1.0);
+            self.target_y = ((ty / current_sens) as f64).clamp(-1.0, 1.0);
+        }
+
+        if self.paused {
+            let (r, g, b) = self.config.color_rgb;
+            return ((r as f32, g as f32, b as f32), Vec::new());
         }
 
         self.current_x += (self.target_x - self.current_x) * 0.05;
@@ -225,22 +248,155 @@ impl AppState {
 #[cfg(windows)]
 mod win_app {
     use super::*;
-    use windows::core::w;
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use std::os::windows::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{
+        ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::HiDpi::{
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
+    use windows::Win32::UI::Shell::{
+        Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetSystemMetrics, KillTimer,
-        LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowPos,
-        ShowWindow, TranslateMessage, HWND_TOPMOST, IDC_ARROW, MSG, PM_REMOVE, SM_CXSCREEN,
-        SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WM_DESTROY,
-        WM_DISPLAYCHANGE, WM_QUIT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+        DispatchMessageW, GetCursorPos, GetSystemMetrics, KillTimer, LoadCursorW, LoadIconW,
+        PeekMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
+        SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, WaitMessage, HICON,
+        HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG,
+        PM_REMOVE, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SW_SHOWNOACTIVATE, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WM_APP, WM_COMMAND,
+        WM_DESTROY, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK, WM_QUIT, WM_RBUTTONUP, WM_TIMER,
+        WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_EX_TRANSPARENT, WS_POPUP,
     };
 
     const TIMER_ID_FRAME: usize = 1;
+    const WM_TRAYICON: u32 = WM_APP + 1;
+    const TRAY_ICON_ID: u32 = 1001;
+
+    const IDM_OPEN_SETTINGS: usize = 2001;
+    const IDM_TOGGLE_PAUSE: usize = 2002;
+    const IDM_TOGGLE_SIMULATE: usize = 2003;
+    const IDM_EXIT: usize = 2004;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    fn target_bounds(monitor_mode: &str) -> (i32, i32, i32, i32) {
+        unsafe {
+            if monitor_mode.eq_ignore_ascii_case("All") {
+                let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+                let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                let w = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
+                let h = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+                (x, y, w, h)
+            } else {
+                let w = GetSystemMetrics(SM_CXSCREEN).max(1);
+                let h = GetSystemMetrics(SM_CYSCREEN).max(1);
+                (0, 0, w, h)
+            }
+        }
+    }
+
+    fn launch_control_panel() {
+        let candidates = [
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("control_panel.exe"))),
+            Some(PathBuf::from("control_panel.exe")),
+            Some(PathBuf::from("target/release/control_panel.exe")),
+        ];
+        for cand in candidates.into_iter().flatten() {
+            if cand.exists() {
+                let _ = Command::new(cand)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn();
+                return;
+            }
+        }
+    }
+
+    unsafe fn add_tray_icon(hwnd: HWND, hicon: HICON) {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_ICON_ID,
+            uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+            uCallbackMessage: WM_TRAYICON,
+            hIcon: hicon,
+            ..Default::default()
+        };
+        let tip = "Mewtion — Vehicle Motion Cues";
+        for (dst, src) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
+            *dst = src;
+        }
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid as *const NOTIFYICONDATAW);
+    }
+
+    unsafe fn remove_tray_icon(hwnd: HWND) {
+        let nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_ICON_ID,
+            ..Default::default()
+        };
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid as *const NOTIFYICONDATAW);
+    }
+
+    unsafe fn show_tray_context_menu(hwnd: HWND, paused: bool, simulating: bool) {
+        let Ok(hmenu) = CreatePopupMenu() else {
+            return;
+        };
+
+        let _ = AppendMenuW(
+            hmenu,
+            MF_STRING,
+            IDM_OPEN_SETTINGS,
+            w!("Open Mewtion Settings"),
+        );
+
+        let pause_flags = if paused {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        let _ = AppendMenuW(hmenu, pause_flags, IDM_TOGGLE_PAUSE, w!("Pause Motion Cues"));
+
+        let sim_flags = if simulating {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        let _ = AppendMenuW(
+            hmenu,
+            sim_flags,
+            IDM_TOGGLE_SIMULATE,
+            w!("Simulate Motion (Desk Test)"),
+        );
+
+        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(hmenu, MF_STRING, IDM_EXIT, w!("Exit Mewtion"));
+
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt as *mut POINT);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = TrackPopupMenu(
+            hmenu,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(hmenu);
+    }
 
     pub unsafe extern "system" fn wnd_proc(
         hwnd: HWND,
@@ -250,6 +406,7 @@ mod win_app {
     ) -> LRESULT {
         match msg {
             WM_DESTROY => {
+                remove_tray_icon(hwnd);
                 let _ = KillTimer(hwnd, TIMER_ID_FRAME);
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -260,26 +417,38 @@ mod win_app {
 
     pub fn run() {
         unsafe {
-            // Opt into Per-Monitor V2 DPI awareness so dots render at crisp native physical resolution.
+            // 1. Single-instance guard so launching Mewtion.exe multiple times never stacks overlays.
+            let _mutex = CreateMutexW(None, false, w!("Local\\MewtionOverlaySingletonMutex"));
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                return;
+            }
+
+            // 2. Opt into Per-Monitor V2 DPI awareness so dots render at native physical pixels.
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
             let hinstance = GetModuleHandleW(None).expect("Failed to get module handle");
             let class_name = w!("MewtionOverlayWindowClass");
+            let app_icon = LoadIconW(hinstance, PCWSTR(1usize as *const u16))
+                .or_else(|_| LoadIconW(None, IDI_APPLICATION))
+                .unwrap_or_default();
 
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(wnd_proc),
                 hInstance: hinstance.into(),
                 lpszClassName: class_name,
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                hIcon: app_icon,
                 ..Default::default()
             };
             RegisterClassW(&wc);
 
-            let mut screen_w = GetSystemMetrics(SM_CXSCREEN).max(1);
-            let mut screen_h = GetSystemMetrics(SM_CYSCREEN).max(1);
+            let loaded_config = MewtionConfig::load();
+            let mut active_monitor_mode = loaded_config.monitor_mode.clone();
+            let (mut screen_x, mut screen_y, mut screen_w, mut screen_h) =
+                target_bounds(&active_monitor_mode);
 
             // WS_EX_LAYERED | WS_EX_TRANSPARENT: 100% OS click-through + per-pixel alpha
-            // WS_EX_TOPMOST: Always on top of normal windows
+            // WS_EX_TOPMOST: Always on top of normal windows and borderless games
             // WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE: Hidden from taskbar/Alt+Tab and never steals focus
             let ex_style = WS_EX_LAYERED
                 | WS_EX_TRANSPARENT
@@ -292,8 +461,8 @@ mod win_app {
                 class_name,
                 w!("Mewtion Overlay"),
                 WS_POPUP,
-                0,
-                0,
+                screen_x,
+                screen_y,
                 screen_w,
                 screen_h,
                 None,
@@ -304,8 +473,8 @@ mod win_app {
             .expect("Failed to create Win32 overlay window");
 
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            add_tray_icon(hwnd, app_icon);
 
-            let loaded_config = MewtionConfig::load();
             let shared_ip = Arc::new(Mutex::new(loaded_config.phone_ip.clone()));
             let mut state = AppState::new(loaded_config);
 
@@ -318,7 +487,12 @@ mod win_app {
             // Prefer the machine's built-in Windows sensors; fall back to the Android companion app over TCP.
             std::thread::spawn(move || match win_sensor::WinSensorSource::discover() {
                 Some(source) => {
-                    println!("Mewtion: using built-in Windows sensors ({})", source.describe());
+                    let desc = source.describe();
+                    println!("Mewtion: using built-in Windows sensors ({desc})");
+                    let _ = fs::write(
+                        MewtionConfig::status_path(),
+                        format!("Active: Built-in {desc}"),
+                    );
                     win_sensor::run_win_sensor_blocking(source, move |sample| {
                         let _ = sender.send(sample);
                     });
@@ -343,17 +517,51 @@ mod win_app {
                         break 'running;
                     }
 
+                    if msg.message == WM_TRAYICON {
+                        let event = (msg.lParam.0 as u32) & 0xFFFF;
+                        if event == WM_RBUTTONUP {
+                            show_tray_context_menu(
+                                hwnd,
+                                state.paused,
+                                state.config.simulate_motion,
+                            );
+                        } else if event == WM_LBUTTONDBLCLK {
+                            launch_control_panel();
+                        }
+                        continue;
+                    }
+
+                    if msg.message == WM_COMMAND {
+                        let cmd_id = msg.wParam.0 & 0xFFFF;
+                        match cmd_id {
+                            IDM_OPEN_SETTINGS => launch_control_panel(),
+                            IDM_TOGGLE_PAUSE => {
+                                state.paused = !state.paused;
+                            }
+                            IDM_TOGGLE_SIMULATE => {
+                                state.config.simulate_motion = !state.config.simulate_motion;
+                            }
+                            IDM_EXIT => {
+                                remove_tray_icon(hwnd);
+                                break 'running;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     if msg.message == WM_DISPLAYCHANGE {
-                        let new_w = GetSystemMetrics(SM_CXSCREEN).max(1);
-                        let new_h = GetSystemMetrics(SM_CYSCREEN).max(1);
-                        if new_w != screen_w || new_h != screen_h {
-                            screen_w = new_w;
-                            screen_h = new_h;
+                        let (nx, ny, nw, nh) = target_bounds(&active_monitor_mode);
+                        if nx != screen_x || ny != screen_y || nw != screen_w || nh != screen_h {
+                            screen_x = nx;
+                            screen_y = ny;
+                            screen_w = nw;
+                            screen_h = nh;
                             let _ = SetWindowPos(
                                 hwnd,
                                 HWND_TOPMOST,
-                                0,
-                                0,
+                                screen_x,
+                                screen_y,
                                 screen_w,
                                 screen_h,
                                 SWP_NOACTIVATE,
@@ -371,7 +579,33 @@ mod win_app {
                             dot_view.width() as f64,
                             dot_view.height() as f64,
                         );
-                        dot_view.render(hwnd, color, &dots);
+
+                        // Check if monitor mode changed in mewtion_config.txt
+                        if state.config.monitor_mode != active_monitor_mode {
+                            active_monitor_mode = state.config.monitor_mode.clone();
+                            let (nx, ny, nw, nh) = target_bounds(&active_monitor_mode);
+                            if nx != screen_x || ny != screen_y || nw != screen_w || nh != screen_h
+                            {
+                                screen_x = nx;
+                                screen_y = ny;
+                                screen_w = nw;
+                                screen_h = nh;
+                                let _ = SetWindowPos(
+                                    hwnd,
+                                    HWND_TOPMOST,
+                                    screen_x,
+                                    screen_y,
+                                    screen_w,
+                                    screen_h,
+                                    SWP_NOACTIVATE,
+                                );
+                                if let Some(new_view) = DotView::new(screen_w, screen_h) {
+                                    dot_view = new_view;
+                                }
+                            }
+                        }
+
+                        dot_view.render(hwnd, screen_x, screen_y, color, &dots);
 
                         // Periodically re-assert topmost z-order without stealing focus
                         if state.tick_count % 60 == 0 {
@@ -391,9 +625,11 @@ mod win_app {
                     }
                 }
 
-                // Wait briefly until next message or timer tick to keep idle CPU near 0%
-                windows::Win32::UI::WindowsAndMessaging::WaitMessage().ok();
+                // Sleep until next message or timer tick to keep idle CPU near 0%
+                WaitMessage().ok();
             }
+
+            remove_tray_icon(hwnd);
         }
     }
 }
@@ -404,6 +640,31 @@ fn main() {
 
     #[cfg(not(windows))]
     {
-        eprintln!("Mewtion-win is a Windows-native port. Build and run on Windows (or target x86_64-pc-windows-msvc).");
+        eprintln!("Mewtion-win is a Windows-native port. Build and run on Windows (x86_64 or ARM64).");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_particle_simulation_and_simulation_mode() {
+        let mut cfg = MewtionConfig::default();
+        cfg.simulate_motion = true;
+        let mut state = AppState::new(cfg);
+        let (_tx, rx) = std::sync::mpsc::channel::<MotionSample>();
+        let shared_ip = Arc::new(Mutex::new("127.0.0.1".to_string()));
+
+        let mut max_dots = 0;
+        for _ in 0..30 {
+            let (_color, dots) = state.step(&rx, &shared_ip, 1920.0, 1080.0);
+            max_dots = max_dots.max(dots.len());
+        }
+        assert!(max_dots > 0, "Expected simulated motion to spawn dots");
+
+        state.paused = true;
+        let (_color, paused_dots) = state.step(&rx, &shared_ip, 1920.0, 1080.0);
+        assert!(paused_dots.is_empty(), "Expected paused state to return zero dots");
     }
 }

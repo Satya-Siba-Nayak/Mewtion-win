@@ -15,8 +15,18 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build Windows x86_64 Package
+    name: Build Windows (${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            run_tests: true
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            run_tests: false
 
     steps:
       - name: Checkout repository
@@ -25,47 +35,70 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Build release binaries
-        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Run unit tests (x86_64)
+        if: matrix.run_tests
+        run: cargo test --target ${{ matrix.target }}
 
-      - name: Package Portable Windows Archive (.zip)
+      - name: Build release binaries (${{ matrix.arch }})
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package Portable Archive (.zip) & Installer (.exe)
         shell: pwsh
         run: |
-          $Version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "v0.1.0" }
-          $PkgName = "Mewtion-$Version-windows-x86_64"
+          $RawTag = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "v0.1.0" }
+          $CleanVer = $RawTag.TrimStart('v')
+          $Arch = "${{ matrix.arch }}"
+          $Target = "${{ matrix.target }}"
+          $PkgName = "Mewtion-$RawTag-windows-$Arch"
           $DistDir = "dist/$PkgName"
 
           New-Item -ItemType Directory -Force -Path "$DistDir/assets" | Out-Null
 
-          Copy-Item "target/x86_64-pc-windows-msvc/release/Mewtion.exe" "$DistDir/"
-          Copy-Item "target/x86_64-pc-windows-msvc/release/control_panel.exe" "$DistDir/"
+          Copy-Item "target/$Target/release/Mewtion.exe" "$DistDir/"
+          Copy-Item "target/$Target/release/control_panel.exe" "$DistDir/"
           Copy-Item "start.bat" "$DistDir/"
           Copy-Item "mewtion_config.txt" "$DistDir/"
           Copy-Item "LICENSE" "$DistDir/"
           Copy-Item "README.md" "$DistDir/"
-          if (Test-Path "assets/*") {
-            Copy-Item "assets/*" "$DistDir/assets/" -Recurse -Force
-          }
+          Copy-Item "assets/dev.mewtion.Overlay.svg" "$DistDir/assets/"
+          Copy-Item "assets/mewtion.ico" "$DistDir/assets/"
 
           Compress-Archive -Path "$DistDir" -DestinationPath "$PkgName.zip" -Force
 
-      - name: Upload Windows Package Artifact
+          # Build Windows Setup Installer (.exe) using Inno Setup (pre-installed on windows-latest)
+          $IsccPaths = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          )
+          $Iscc = $IsccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($Iscc) {
+            & $Iscc "/DMyAppVersion=$CleanVer" "/DMyAppArch=$Arch" "/DSourceDir=..\$DistDir" "assets\installer.iss"
+          } else {
+            Write-Warning "ISCC.exe not found; skipping Setup .exe generation."
+          }
+
+      - name: Upload Windows Packages (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
-          name: mewtion-windows-x86_64
-          path: Mewtion-*-windows-x86_64.zip
+          name: mewtion-windows-${{ matrix.arch }}
+          path: |
+            Mewtion-*-windows-${{ matrix.arch }}.zip
+            Mewtion-Setup-*-windows-${{ matrix.arch }}.exe
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: |
-            Mewtion-*-windows-x86_64.zip
+            Mewtion-*-windows-${{ matrix.arch }}.zip
+            Mewtion-Setup-*-windows-${{ matrix.arch }}.exe
           name: Mewtion for Windows ${{ github.ref_name }}
           generate_release_notes: true
           draft: false

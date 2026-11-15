@@ -1,2 +1,0 @@
-size=24
-color=#cc241d
