@@ -158,7 +158,7 @@ impl MewtionConfig {
                 }
                 "animation" => self.animation_mode = value.to_string(),
                 "ip" => self.phone_ip = sanitize_ip(value),
-                "source" => self.sensor_source = value.to_string(),
+                "source" | "sensor_source" => self.sensor_source = value.to_string(),
                 "monitor" => self.monitor_mode = value.to_string(),
                 "orientation" => {
                     if let Ok(v) = value.parse::<i32>() {
@@ -176,6 +176,30 @@ impl MewtionConfig {
                 _ => {}
             }
         }
+    }
+
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        let r = (self.color_rgb.0.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let g = (self.color_rgb.1.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let b = (self.color_rgb.2.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let hex_color = format!("#{r:02x}{g:02x}{b:02x}");
+        let contents = format!(
+            "size={}\ncolor={}\nopacity={}\nmargin={}\nsensitivity={}\nanimation={}\nip={}\nmonitor={}\norientation={}\ninvert_x={}\ninvert_y={}\nsimulate={}\nsensor_source={}\n",
+            self.dot_size,
+            hex_color,
+            self.opacity,
+            self.margin_pct,
+            self.sensitivity,
+            self.animation_mode,
+            sanitize_ip(&self.phone_ip),
+            self.monitor_mode,
+            self.orientation_deg,
+            self.invert_x,
+            self.invert_y,
+            self.simulate_motion,
+            self.sensor_source,
+        );
+        fs::write(Self::config_path(), contents)
     }
 
     /// Transforms raw planar `(ax, ay)` according to user orientation & axis inversion settings.

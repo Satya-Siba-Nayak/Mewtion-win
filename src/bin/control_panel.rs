@@ -954,7 +954,7 @@ impl SettingsApp {
         Task::none()
     }
 
-    fn view(&self) -> Element<Message> {
+    fn view(&self) -> Element<'_, Message> {
         // === 1. COMPACT HERO HEADER BAR WITH `?` SETUP GUIDE BUTTON ===
         let is_connected = self.sensor_status.starts_with("Connected")
             || self.sensor_status.starts_with("Active:");
@@ -1100,7 +1100,7 @@ impl SettingsApp {
         });
 
         // === 3. ACTIVE TAB CONTENT ===
-        let tab_content: Element<Message> = match self.active_tab {
+        let tab_content: Element<'_, Message> = match self.active_tab {
             NavTab::Connection => self.view_connection_tab(),
             NavTab::Appearance => self.view_appearance_tab(),
             NavTab::MotionAndSystem => self.view_motion_system_tab(),
@@ -1141,7 +1141,7 @@ impl SettingsApp {
             .into()
     }
 
-    fn view_connection_tab(&self) -> Element<Message> {
+    fn view_connection_tab(&self) -> Element<'_, Message> {
         let ip_input = text_input("e.g. 192.168.43.1 or 192.168.1.42", &self.phone_ip)
             .on_input(Message::IpChanged)
             .padding([8, 12])
@@ -1277,7 +1277,7 @@ impl SettingsApp {
             .into()
     }
 
-    fn view_appearance_tab(&self) -> Element<Message> {
+    fn view_appearance_tab(&self) -> Element<'_, Message> {
         let dot_px = self.selected_size.pixels();
         let dot_color = Color {
             a: self.opacity,
@@ -1389,7 +1389,7 @@ impl SettingsApp {
                     "Transparency of motion dots",
                     format!("{:.0}%", self.opacity * 100.0),
                     slider(0.1..=1.0, self.opacity, Message::OpacityChanged)
-                        .step(0.05)
+                        .step(0.05_f32)
                         .style(fluent_slider_style)
                         .into(),
                 ),
@@ -1399,7 +1399,7 @@ impl SettingsApp {
                     "Distance from the left and right edges of your display",
                     format!("{:.0}%", self.margin_pct * 100.0),
                     slider(0.0..=0.15, self.margin_pct, Message::MarginChanged)
-                        .step(0.01)
+                        .step(0.01_f32)
                         .style(fluent_slider_style)
                         .into(),
                 ),
@@ -1409,7 +1409,7 @@ impl SettingsApp {
         )
     }
 
-    fn view_motion_system_tab(&self) -> Element<Message> {
+    fn view_motion_system_tab(&self) -> Element<'_, Message> {
         let motion_card = fluent_card(
             column![
                 slider_setting_row(
@@ -1417,7 +1417,7 @@ impl SettingsApp {
                     "Lower values react more strongly to gentle turns and acceleration",
                     format!("{:.1}", self.sensitivity),
                     slider(1.0..=10.0, self.sensitivity, Message::SensitivityChanged)
-                        .step(0.5)
+                        .step(0.5_f32)
                         .style(fluent_slider_style)
                         .into(),
                 ),
@@ -1483,7 +1483,7 @@ impl SettingsApp {
         column![motion_card, system_card].spacing(10).into()
     }
 
-    fn view_guide_tab(&self) -> Element<Message> {
+    fn view_guide_tab(&self) -> Element<'_, Message> {
         let companion_card = fluent_card(
             row![
                 column![
@@ -1634,7 +1634,7 @@ impl SettingsApp {
             .into()
     }
 
-    fn nav_tab_button(&self, tab: NavTab, label: &'static str) -> Element<Message> {
+    fn nav_tab_button(&self, tab: NavTab, label: &'static str) -> Element<'_, Message> {
         let is_selected = self.active_tab == tab;
         button(
             container(
@@ -1677,7 +1677,7 @@ impl SettingsApp {
         .into()
     }
 
-    fn segmented_size_button(&self, size: DotSize) -> Element<Message> {
+    fn segmented_size_button(&self, size: DotSize) -> Element<'_, Message> {
         let is_selected = self.selected_size == size;
         let label = match size {
             DotSize::Small => "Small",
@@ -1719,7 +1719,7 @@ impl SettingsApp {
         .into()
     }
 
-    fn color_swatch(&self, color: DotColor) -> Element<Message> {
+    fn color_swatch(&self, color: DotColor) -> Element<'_, Message> {
         let is_selected = self.selected_color == color;
         button(text(""))
             .on_press(Message::ColorSelected(color))
@@ -1750,7 +1750,7 @@ impl SettingsApp {
 
 // === Fluent / WinUI 3 Layout & Style Helpers ===
 
-fn fluent_card(content: Element<Message>) -> Element<Message> {
+fn fluent_card(content: Element<'_, Message>) -> Element<'_, Message> {
     container(content)
         .width(Length::Fill)
         .padding(14)
