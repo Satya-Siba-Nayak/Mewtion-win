@@ -285,7 +285,7 @@ fn stop_overlay_process() {
     unsafe {
         if let Ok(hwnd) = FindWindowW(w!("MewtionOverlayWindowClass"), None) {
             if !hwnd.0.is_null() {
-                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
                 return;
             }
         }
@@ -598,7 +598,8 @@ fn discover_phone_on_network() -> (Option<String>, String) {
     for h in handles {
         let _ = h.join();
     }
-    if let Some(ip) = *found_priority.lock().unwrap() {
+    let pri_hit = *found_priority.lock().unwrap();
+    if let Some(ip) = pri_hit {
         return (
             Some(ip.to_string()),
             format!("Found phone at {ip}:8765 & connected!"),
@@ -647,7 +648,8 @@ fn discover_phone_on_network() -> (Option<String>, String) {
         for w in workers {
             let _ = w.join();
         }
-        if let Some(ip) = *found_scan.lock().unwrap() {
+        let scan_hit = *found_scan.lock().unwrap();
+        if let Some(ip) = scan_hit {
             return (
                 Some(ip.to_string()),
                 format!("Found phone on network at {ip}:8765 & connected!"),
