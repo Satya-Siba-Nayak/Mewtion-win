@@ -1,15 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use iced::font::{Family, Weight};
-use iced::widget::{
-    button, column, container, pick_list, row, scrollable, slider, text, text_input, toggler,
-};
+use iced::widget::{button, column, container, row, slider, text, text_input, toggler};
 use iced::window;
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Size, Task, Theme};
+use std::collections::HashSet;
 use std::fs;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -24,20 +25,28 @@ const FONT_SEGOE_SEMIBOLD: Font = Font {
     ..Font::DEFAULT
 };
 
-// Windows 11 Fluent / WinUI 3 Dark Palette
-const WIN_BG_MICA: Color = Color::from_rgb(0.125, 0.125, 0.137); // #202023 Mica base
-const WIN_CARD_BG: Color = Color::from_rgb(0.169, 0.169, 0.184); // #2B2B2F WinUI 3 LayerFillColorDefault
-const WIN_CARD_HEADER: Color = Color::from_rgb(0.196, 0.196, 0.215); // #323237 Subtle elevated surface
-const WIN_CARD_BORDER: Color = Color::from_rgb(0.235, 0.235, 0.255); // #3C3C41 CardStrokeColorDefault
-const WIN_DIVIDER: Color = Color::from_rgb(0.220, 0.220, 0.239); // #38383D DividerStrokeColorDefault
-const WIN_INPUT_BG: Color = Color::from_rgb(0.141, 0.141, 0.157); // #242428 ControlFillColorDefault
-const WIN_INPUT_HOVER: Color = Color::from_rgb(0.185, 0.185, 0.204);
+// Refined Windows 11 Fluent / WinUI 3 Dark Palette (PowerToys / Windows 11 Settings style)
+const BG_SIDEBAR: Color = Color::from_rgb(0.094, 0.094, 0.110); // #18181C Mica base
+const BG_CONTENT: Color = Color::from_rgb(0.118, 0.118, 0.137); // #1E1E23 Main workspace
+const BG_CARD: Color = Color::from_rgb(0.153, 0.153, 0.176); // #27272D SettingsCard surface
+const BG_CONTROL: Color = Color::from_rgb(0.192, 0.192, 0.220); // #313138 Inputs & segmented pills
+const BG_CONTROL_HOVER: Color = Color::from_rgb(0.235, 0.235, 0.267); // #3C3C44 Hover state
+const BG_NAV_ACTIVE: Color = Color::from_rgb(0.176, 0.176, 0.208); // #2D2D35 Sidebar active item
 
-const WIN_TEXT_PRIMARY: Color = Color::from_rgb(0.96, 0.96, 0.97); // #F5F5F7
-const WIN_TEXT_SECONDARY: Color = Color::from_rgb(0.68, 0.68, 0.72); // #ADADB8
-const WIN_ACCENT: Color = Color::from_rgb(0.298, 0.761, 1.000); // #4CC2FF Windows 11 Dark Mode Accent
-const WIN_ACCENT_HOVER: Color = Color::from_rgb(0.380, 0.805, 1.000);
-const WIN_ACCENT_DARK_TEXT: Color = Color::from_rgb(0.05, 0.08, 0.12);
+const BORDER_CARD: Color = Color::from_rgb(0.208, 0.208, 0.239); // #35353D Subtle 1px card stroke
+const BORDER_CONTROL: Color = Color::from_rgb(0.263, 0.263, 0.302); // #43434D Input/Button stroke
+
+const TEXT_PRIMARY: Color = Color::from_rgb(0.957, 0.957, 0.969); // #F4F4F7 Crisp primary text
+const TEXT_SECONDARY: Color = Color::from_rgb(0.635, 0.639, 0.682); // #A2A3AE Muted subtitle text
+const TEXT_MUTED: Color = Color::from_rgb(0.475, 0.478, 0.525); // #797A86 Subtle caption
+
+const ACCENT_BLUE: Color = Color::from_rgb(0.376, 0.804, 1.000); // #60CDFF Win11 Dark Accent
+const ACCENT_BLUE_HOVER: Color = Color::from_rgb(0.475, 0.843, 1.000);
+const ACCENT_DARK_TEXT: Color = Color::from_rgb(0.047, 0.075, 0.118);
+
+const STATUS_GREEN: Color = Color::from_rgb(0.247, 0.804, 0.439);
+const STATUS_AMBER: Color = Color::from_rgb(0.988, 0.725, 0.192);
+const STATUS_RED: Color = Color::from_rgb(0.969, 0.349, 0.349);
 
 const COLOR_WHITE: Color = Color::from_rgb(1.00, 1.00, 1.00);
 const COLOR_BLUE: Color = Color::from_rgb(0.00, 0.48, 1.00);
@@ -51,8 +60,8 @@ pub fn main() -> iced::Result {
     ensure_adb_and_overlay_started();
 
     let mut win_settings = window::Settings {
-        size: Size::new(560.0, 680.0),
-        min_size: Some(Size::new(480.0, 560.0)),
+        size: Size::new(780.0, 540.0),
+        min_size: Some(Size::new(720.0, 500.0)),
         position: window::Position::Centered,
         icon: build_window_icon(),
         ..window::Settings::default()
@@ -73,8 +82,6 @@ pub fn main() -> iced::Result {
         .run()
 }
 
-/// Generates a crisp 32x32 RGBA window icon matching the Mewtion brand so the titlebar
-/// and taskbar always show the custom icon.
 fn build_window_icon() -> Option<window::Icon> {
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
@@ -94,7 +101,6 @@ fn build_window_icon() -> Option<window::Icon> {
                 rgba[idx + 2] = 0x28;
                 rgba[idx + 3] = (alpha * 255.0) as u8;
 
-                // Bright cyan motion dots around the perimeter
                 let dots = [
                     (8.0f32, 6.0f32),
                     (16.0, 6.0),
@@ -109,8 +115,8 @@ fn build_window_icon() -> Option<window::Icon> {
                 for &(cx, cy) in &dots {
                     let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
                     if d <= 2.3 {
-                        rgba[idx] = 0x4C;
-                        rgba[idx + 1] = 0xC2;
+                        rgba[idx] = 0x60;
+                        rgba[idx + 1] = 0xCD;
                         rgba[idx + 2] = 0xFF;
                         rgba[idx + 3] = 255;
                     }
@@ -121,8 +127,6 @@ fn build_window_icon() -> Option<window::Icon> {
     window::icon::from_rgba(rgba, size, size).ok()
 }
 
-/// Applies native Windows 11 DWM Dark Mode titlebar (`DWMWA_USE_IMMERSIVE_DARK_MODE`),
-/// dark caption color (`#202023`), and Mica backdrop (`DWMWA_SYSTEMBACKDROP_TYPE`).
 #[cfg(windows)]
 fn apply_win11_dwm_chrome() {
     std::thread::spawn(|| {
@@ -134,7 +138,7 @@ fn apply_win11_dwm_chrome() {
         use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
 
         for _ in 0..25 {
-            std::thread::sleep(std::time::Duration::from_millis(60));
+            std::thread::sleep(Duration::from_millis(60));
             unsafe {
                 if let Ok(hwnd) = FindWindowW(None, w!("Mewtion Settings")) {
                     if !hwnd.0.is_null() {
@@ -145,15 +149,14 @@ fn apply_win11_dwm_chrome() {
                             &dark_mode as *const _ as *const _,
                             std::mem::size_of::<i32>() as u32,
                         );
-                        // COLORREF is 0x00BBGGRR -> #202023 is 0x00232020
-                        let caption_color: u32 = 0x0023_2020;
+                        // COLORREF 0x00BBGGRR for #18181C -> 0x001C1818
+                        let caption_color: u32 = 0x001C_1818;
                         let _ = DwmSetWindowAttribute(
                             hwnd,
                             DWMWA_CAPTION_COLOR,
                             &caption_color as *const _ as *const _,
                             std::mem::size_of::<u32>() as u32,
                         );
-                        // DWMSBT_MAINWINDOW (Mica) = 2
                         let mica_backdrop: i32 = 2;
                         let _ = DwmSetWindowAttribute(
                             hwnd,
@@ -179,7 +182,8 @@ fn sanitize_ip_input(raw: &str) -> String {
         .or_else(|| trimmed.strip_prefix("http://"))
         .or_else(|| trimmed.strip_prefix("https://"))
         .unwrap_or(trimmed)
-        .trim();
+        .trim()
+        .trim_end_matches('/');
 
     let host = if let Some((h, _port)) = without_scheme.rsplit_once(':') {
         if !h.contains(':') {
@@ -198,37 +202,46 @@ fn sanitize_ip_input(raw: &str) -> String {
     }
 }
 
-fn resolve_config_path() -> PathBuf {
-    let cwd_path = PathBuf::from("mewtion_config.txt");
-    if cwd_path.exists() {
-        return cwd_path;
+/// Always uses `%LOCALAPPDATA%\Mewtion` so config and status writes never fail with
+/// `PermissionDenied` when installed under `C:\Program Files\Mewtion`.
+fn app_data_dir() -> PathBuf {
+    if let Ok(local_app_data) =
+        std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA"))
+    {
+        let dir = PathBuf::from(local_app_data).join("Mewtion");
+        if fs::create_dir_all(&dir).is_ok() {
+            return dir;
+        }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let exe_cfg = dir.join("mewtion_config.txt");
-            if exe_cfg.exists() {
-                return exe_cfg;
-            }
-            if let Some(parent) = dir.parent() {
-                let parent_cfg = parent.join("mewtion_config.txt");
-                if parent_cfg.exists() {
-                    return parent_cfg;
-                }
-            }
-            return exe_cfg;
+            return dir.to_path_buf();
         }
     }
-    cwd_path
+    PathBuf::from(".")
+}
+
+fn resolve_config_path() -> PathBuf {
+    let cfg_path = app_data_dir().join("mewtion_config.txt");
+    if !cfg_path.exists() {
+        let seed_candidates = [
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("mewtion_config.txt"))),
+            Some(PathBuf::from("mewtion_config.txt")),
+        ];
+        for cand in seed_candidates.into_iter().flatten() {
+            if cand.exists() && cand != cfg_path {
+                let _ = fs::copy(&cand, &cfg_path);
+                break;
+            }
+        }
+    }
+    cfg_path
 }
 
 fn resolve_status_path() -> PathBuf {
-    let cfg = resolve_config_path();
-    if let Some(parent) = cfg.parent() {
-        if !parent.as_os_str().is_empty() {
-            return parent.join("mewtion_status.txt");
-        }
-    }
-    PathBuf::from("mewtion_status.txt")
+    app_data_dir().join("mewtion_status.txt")
 }
 
 fn read_sensor_status() -> String {
@@ -236,7 +249,7 @@ fn read_sensor_status() -> String {
         .map(|s| s.trim().to_string())
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Overlay ready — waiting for sensor stream".to_string())
+        .unwrap_or_else(|| "Waiting for sensor stream...".to_string())
 }
 
 fn new_silent_command(program: &str) -> Command {
@@ -246,16 +259,44 @@ fn new_silent_command(program: &str) -> Command {
     cmd
 }
 
+/// Instantaneous Win32 window check (< 1 microsecond, zero process spawns!)
+#[cfg(windows)]
 fn is_overlay_running() -> bool {
-    if let Ok(output) = new_silent_command("tasklist")
-        .args(["/FI", "IMAGENAME eq Mewtion.exe", "/NH"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-        return stdout.contains("mewtion.exe");
+    use windows::core::w;
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    unsafe {
+        if let Ok(hwnd) = FindWindowW(w!("MewtionOverlayWindowClass"), None) {
+            return !hwnd.0.is_null();
+        }
     }
     false
 }
+
+#[cfg(not(windows))]
+fn is_overlay_running() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn stop_overlay_process() {
+    use windows::core::w;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CLOSE};
+    unsafe {
+        if let Ok(hwnd) = FindWindowW(w!("MewtionOverlayWindowClass"), None) {
+            if !hwnd.0.is_null() {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                return;
+            }
+        }
+    }
+    let _ = new_silent_command("taskkill")
+        .args(["/F", "/IM", "Mewtion.exe"])
+        .output();
+}
+
+#[cfg(not(windows))]
+fn stop_overlay_process() {}
 
 fn find_overlay_exe() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
@@ -277,21 +318,100 @@ fn find_overlay_exe() -> Option<PathBuf> {
     None
 }
 
-fn ensure_adb_and_overlay_started() {
-    apply_win11_dwm_chrome();
+fn ensure_overlay_running() -> bool {
+    if is_overlay_running() {
+        return true;
+    }
+    if let Some(overlay_path) = find_overlay_exe() {
+        let mut cmd = new_silent_command(overlay_path.to_str().unwrap_or("Mewtion.exe"));
+        if let Some(parent) = overlay_path.parent() {
+            cmd.current_dir(parent);
+        }
+        return cmd.spawn().is_ok();
+    }
+    false
+}
 
-    // Run ADB port forward and overlay startup check on a background thread
-    // so the Control Panel window opens instantaneously with zero startup delay.
-    std::thread::spawn(|| {
-        let _ = new_silent_command("adb")
-            .args(["forward", "tcp:8765", "tcp:8765"])
-            .output();
+fn find_adb_executable() -> String {
+    let mut candidates = vec![PathBuf::from("adb.exe"), PathBuf::from("adb")];
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(&local)
+                .join("Android")
+                .join("Sdk")
+                .join("platform-tools")
+                .join("adb.exe"),
+        );
+        candidates.push(
+            PathBuf::from(&local)
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Links")
+                .join("adb.exe"),
+        );
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        candidates.push(
+            PathBuf::from(&profile)
+                .join("Downloads")
+                .join("platform-tools")
+                .join("adb.exe"),
+        );
+        candidates.push(
+            PathBuf::from(&profile)
+                .join("Downloads")
+                .join("platform-tools-latest-windows")
+                .join("platform-tools")
+                .join("adb.exe"),
+        );
+        candidates.push(
+            PathBuf::from(&profile)
+                .join("Desktop")
+                .join("platform-tools")
+                .join("adb.exe"),
+        );
+    }
+    candidates.push(PathBuf::from(r"C:\platform-tools\adb.exe"));
 
-        if !is_overlay_running() {
-            if let Some(overlay_path) = find_overlay_exe() {
-                let _ = new_silent_command(overlay_path.to_str().unwrap_or("Mewtion.exe")).spawn();
+    for cand in candidates {
+        if cand.is_absolute() && cand.exists() {
+            return cand.to_string_lossy().to_string();
+        }
+    }
+    "adb".to_string()
+}
+
+fn run_adb_forward() -> Result<String, String> {
+    let adb = find_adb_executable();
+    match new_silent_command(&adb)
+        .args(["forward", "tcp:8765", "tcp:8765"])
+        .output()
+    {
+        Ok(out) => {
+            if out.status.success() {
+                Ok("USB ADB port 8765 forwarded — connecting to 127.0.0.1:8765".to_string())
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    Err("ADB returned an error — check that USB Debugging is allowed on your phone".to_string())
+                } else {
+                    Err(format!("ADB: {stderr}"))
+                }
             }
         }
+        Err(_) => Err(
+            "ADB not found on PC — open Setup Guide → USB Cable to download ADB Tools".to_string(),
+        ),
+    }
+}
+
+fn ensure_adb_and_overlay_started() {
+    apply_win11_dwm_chrome();
+    // Immediately start Mewtion.exe before doing anything else so the overlay is always active!
+    ensure_overlay_running();
+
+    std::thread::spawn(|| {
+        let _ = run_adb_forward();
     });
 }
 
@@ -363,45 +483,207 @@ fn set_autostart_enabled(enabled: bool) -> bool {
     }
 }
 
-fn detect_windows_gateway_ip() -> Option<String> {
+fn extract_ipv4_tokens(text: &str) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    for token in text.split(|c: char| !c.is_ascii_digit() && c != '.') {
+        if token.chars().filter(|&c| c == '.').count() == 3 {
+            if let Ok(ip) = token.parse::<Ipv4Addr>() {
+                if !ip.is_unspecified() && !ip.is_broadcast() && ip.octets()[0] != 255 {
+                    out.push(ip);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn probe_port_8765(ip: Ipv4Addr, timeout_ms: u64) -> bool {
+    let addr = SocketAddr::V4(SocketAddrV4::new(ip, 8765));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)).is_ok()
+}
+
+/// Smart discovery that checks:
+/// 1. ADB USB (`127.0.0.1:8765`)
+/// 2. All IPv4 Default Gateways (handles multi-line IPv6+IPv4 `ipconfig` output on Windows 11)
+/// 3. All `arp -a` neighbor IPs on port 8765
+/// 4. Parallel 32-thread scan of active private `/24` subnets for any phone running `Mewtion-Android` on port 8765!
+fn discover_phone_on_network() -> (Option<String>, String) {
+    let _ = run_adb_forward();
+    if probe_port_8765(Ipv4Addr::new(127, 0, 0, 1), 180) {
+        return (
+            Some("127.0.0.1".to_string()),
+            "Found phone over USB (127.0.0.1:8765) & connected!".to_string(),
+        );
+    }
+
+    let mut priority_ips: Vec<Ipv4Addr> = Vec::new();
+    let mut local_subnets: Vec<[u8; 3]> = Vec::new();
+    let mut fallback_gateway: Option<Ipv4Addr> = None;
+
     if let Ok(output) = new_silent_command("ipconfig").output() {
         let text = String::from_utf8_lossy(&output.stdout);
+        let mut in_gateway_section = false;
         for line in text.lines() {
-            if line.contains("Default Gateway") {
-                if let Some((_left, right)) = line.split_once(':') {
-                    let candidate = right.trim();
-                    if !candidate.is_empty() && candidate.contains('.') && candidate != "0.0.0.0" {
-                        return Some(candidate.to_string());
+            let trimmed = line.trim();
+            if trimmed.contains("Default Gateway") {
+                in_gateway_section = true;
+                for ip in extract_ipv4_tokens(trimmed) {
+                    if !ip.is_loopback() {
+                        priority_ips.push(ip);
+                        if fallback_gateway.is_none() {
+                            fallback_gateway = Some(ip);
+                        }
+                    }
+                }
+            } else if in_gateway_section {
+                if trimmed.contains(':') && !trimmed.starts_with("fe80") {
+                    in_gateway_section = false;
+                } else {
+                    for ip in extract_ipv4_tokens(trimmed) {
+                        if !ip.is_loopback() {
+                            priority_ips.push(ip);
+                            if fallback_gateway.is_none() {
+                                fallback_gateway = Some(ip);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if trimmed.contains("IPv4 Address") || trimmed.contains("IP Address") {
+                for ip in extract_ipv4_tokens(trimmed) {
+                    let o = ip.octets();
+                    if o[0] == 192 || o[0] == 10 || o[0] == 172 {
+                        let subnet = [o[0], o[1], o[2]];
+                        if !local_subnets.contains(&subnet) {
+                            local_subnets.push(subnet);
+                        }
+                        // Also add .1 of this subnet as a likely hotspot gateway
+                        let gw = Ipv4Addr::new(o[0], o[1], o[2], 1);
+                        if !priority_ips.contains(&gw) {
+                            priority_ips.push(gw);
+                        }
                     }
                 }
             }
         }
     }
 
-    if let Ok(output) = new_silent_command("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1).NextHop",
-        ])
-        .output()
-    {
-        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !ip.is_empty() && ip != "0.0.0.0" && ip.contains('.') {
-            return Some(ip);
+    if let Ok(output) = new_silent_command("arp").arg("-a").output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for ip in extract_ipv4_tokens(&text) {
+            let o = ip.octets();
+            if (o[0] == 192 || o[0] == 10 || o[0] == 172) && o[3] != 255 && o[3] != 0 {
+                if !priority_ips.contains(&ip) {
+                    priority_ips.push(ip);
+                }
+            }
         }
     }
 
-    None
+    // 1. Probe priority candidates (gateways + ARP neighbors) in parallel
+    let found_priority = Arc::new(Mutex::new(None::<Ipv4Addr>));
+    let mut handles = Vec::new();
+    for ip in priority_ips {
+        let found_ref = found_priority.clone();
+        handles.push(std::thread::spawn(move || {
+            if probe_port_8765(ip, 250) {
+                let mut guard = found_ref.lock().unwrap();
+                if guard.is_none() {
+                    *guard = Some(ip);
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    if let Some(ip) = *found_priority.lock().unwrap() {
+        return (
+            Some(ip.to_string()),
+            format!("Found phone at {ip}:8765 & connected!"),
+        );
+    }
+
+    // 2. Scan active /24 subnet(s) in parallel (32 worker threads, 200ms timeout)
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    for s in local_subnets.iter().take(2) {
+        for host in 1u8..=254u8 {
+            let ip = Ipv4Addr::new(s[0], s[1], s[2], host);
+            if seen.insert(ip) {
+                candidates.push(ip);
+            }
+        }
+    }
+
+    if !candidates.is_empty() {
+        let queue = Arc::new(Mutex::new(candidates));
+        let found_scan = Arc::new(Mutex::new(None::<Ipv4Addr>));
+        let mut workers = Vec::new();
+        for _ in 0..32 {
+            let q = queue.clone();
+            let f = found_scan.clone();
+            workers.push(std::thread::spawn(move || loop {
+                if f.lock().unwrap().is_some() {
+                    break;
+                }
+                let next_ip = {
+                    let mut guard = q.lock().unwrap();
+                    guard.pop()
+                };
+                let Some(ip) = next_ip else {
+                    break;
+                };
+                if probe_port_8765(ip, 200) {
+                    let mut guard = f.lock().unwrap();
+                    if guard.is_none() {
+                        *guard = Some(ip);
+                    }
+                    break;
+                }
+            }));
+        }
+        for w in workers {
+            let _ = w.join();
+        }
+        if let Some(ip) = *found_scan.lock().unwrap() {
+            return (
+                Some(ip.to_string()),
+                format!("Found phone on network at {ip}:8765 & connected!"),
+            );
+        }
+    }
+
+    if let Some(gw) = fallback_gateway {
+        (
+            Some(gw.to_string()),
+            format!(
+                "Set gateway {gw} — port 8765 did not respond yet (make sure Mewtion-Android is open)"
+            ),
+        )
+    } else {
+        (
+            None,
+            "No device with port 8765 open found — check that Mewtion-Android is running".to_string(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavTab {
     Connection,
     Appearance,
-    MotionAndSystem,
+    MotionAndDisplay,
+    Calibration,
     Guide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuideMethod {
+    Hotspot,
+    Wifi,
+    Usb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,19 +708,6 @@ impl SensorSourcePref {
         } else {
             SensorSourcePref::Auto
         }
-    }
-}
-impl std::fmt::Display for SensorSourcePref {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                SensorSourcePref::Auto => "Auto (Phone + Built-in)",
-                SensorSourcePref::Phone => "Android Phone Only",
-                SensorSourcePref::BuiltIn => "Built-in Sensor Only",
-            }
-        )
     }
 }
 
@@ -525,18 +794,6 @@ pub enum AnimMode {
     Fluid,
     Rigid,
 }
-impl std::fmt::Display for AnimMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                AnimMode::Fluid => "Fluid (Organic)",
-                AnimMode::Rigid => "Rigid (Mechanical)",
-            }
-        )
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonitorTarget {
@@ -556,18 +813,6 @@ impl MonitorTarget {
         } else {
             MonitorTarget::Primary
         }
-    }
-}
-impl std::fmt::Display for MonitorTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                MonitorTarget::Primary => "Primary Display",
-                MonitorTarget::All => "All Displays (Span)",
-            }
-        )
     }
 }
 
@@ -596,23 +841,17 @@ impl Orientation {
         }
     }
 }
-impl std::fmt::Display for Orientation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Orientation::Deg0 => "0° (Standard)",
-                Orientation::Deg90 => "90° (Landscape Right)",
-                Orientation::Deg180 => "180° (Inverted)",
-                Orientation::Deg270 => "270° (Landscape Left)",
-            }
-        )
-    }
+
+struct SharedBgState {
+    overlay_running: bool,
+    sensor_status: String,
+    discovered_ip: Option<String>,
+    pending_toast: Option<String>,
 }
 
 struct SettingsApp {
     active_tab: NavTab,
+    guide_method: GuideMethod,
     selected_size: DotSize,
     selected_color: DotColor,
     opacity: f32,
@@ -630,28 +869,35 @@ struct SettingsApp {
     overlay_running: bool,
     sensor_status: String,
     status_message: String,
-    bg_status: Arc<Mutex<(bool, String)>>,
+    bg_state: Arc<Mutex<SharedBgState>>,
 }
 
 impl Default for SettingsApp {
     fn default() -> Self {
         let path = resolve_config_path();
+        let initial_running = is_overlay_running();
         let initial_status = read_sensor_status();
-        let bg_status = Arc::new(Mutex::new((true, initial_status.clone())));
-        let bg_clone = bg_status.clone();
+        let bg_state = Arc::new(Mutex::new(SharedBgState {
+            overlay_running: initial_running,
+            sensor_status: initial_status.clone(),
+            discovered_ip: None,
+            pending_toast: None,
+        }));
+        let bg_clone = bg_state.clone();
 
-        // Background status poller so the UI thread NEVER spawns tasklist.exe or blocks on I/O!
         std::thread::spawn(move || loop {
             let running = is_overlay_running();
             let status_txt = read_sensor_status();
             if let Ok(mut guard) = bg_clone.lock() {
-                *guard = (running, status_txt);
+                guard.overlay_running = running;
+                guard.sensor_status = status_txt;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1200));
+            std::thread::sleep(Duration::from_millis(600));
         });
 
         let mut app = Self {
             active_tab: NavTab::Connection,
+            guide_method: GuideMethod::Hotspot,
             selected_size: DotSize::Medium,
             selected_color: DotColor::White,
             opacity: 0.85,
@@ -666,10 +912,10 @@ impl Default for SettingsApp {
             simulate_motion: false,
             autostart_windows: is_autostart_enabled(),
             phone_ip: "127.0.0.1".to_string(),
-            overlay_running: true,
+            overlay_running: initial_running,
             sensor_status: initial_status,
-            status_message: "All settings auto-apply in real time".to_string(),
-            bg_status,
+            status_message: "Changes apply automatically in real time".to_string(),
+            bg_state,
         };
 
         if let Ok(contents) = fs::read_to_string(path) {
@@ -709,7 +955,9 @@ impl Default for SettingsApp {
                         };
                     }
                     "monitor" => app.monitor_target = MonitorTarget::from_str(v),
-                    "sensor_source" => app.sensor_source = SensorSourcePref::from_str(v),
+                    "source" | "sensor_source" => {
+                        app.sensor_source = SensorSourcePref::from_str(v)
+                    }
                     "orientation" => {
                         if let Ok(val) = v.parse::<i32>() {
                             app.orientation = Orientation::from_degrees(val);
@@ -723,6 +971,8 @@ impl Default for SettingsApp {
                 }
             }
         }
+        // Write initial config to %LOCALAPPDATA%\Mewtion so Mewtion.exe and control_panel.exe are synced
+        let _ = app.write_config();
         app
     }
 }
@@ -730,7 +980,7 @@ impl Default for SettingsApp {
 #[derive(Debug, Clone)]
 pub enum Message {
     TabSelected(NavTab),
-    ToggleGuide,
+    GuideMethodSelected(GuideMethod),
     SizeSelected(DotSize),
     ColorSelected(DotColor),
     OpacityChanged(f32),
@@ -746,7 +996,8 @@ pub enum Message {
     AutostartChanged(bool),
     IpChanged(String),
     SetUsbMode,
-    AutoDetectHotspot,
+    AutoDetectPhone,
+    TestConnection,
     RefreshStatus,
     ToggleOverlay(bool),
     ResetDefaults,
@@ -755,9 +1006,23 @@ pub enum Message {
 
 impl SettingsApp {
     fn sync_background_status(&mut self) {
-        if let Ok(guard) = self.bg_status.try_lock() {
-            self.overlay_running = guard.0;
-            self.sensor_status = guard.1.clone();
+        let mut apply_discovered: Option<String> = None;
+        if let Ok(mut guard) = self.bg_state.try_lock() {
+            self.overlay_running = guard.overlay_running;
+            self.sensor_status = guard.sensor_status.clone();
+            if let Some(ip) = guard.discovered_ip.take() {
+                apply_discovered = Some(ip);
+            }
+            if let Some(toast) = guard.pending_toast.take() {
+                self.status_message = toast;
+            }
+        }
+        if let Some(ip) = apply_discovered {
+            self.phone_ip = ip;
+            if self.sensor_source == SensorSourcePref::BuiltIn {
+                self.sensor_source = SensorSourcePref::Auto;
+            }
+            let _ = self.write_config();
         }
     }
 
@@ -786,25 +1051,19 @@ impl SettingsApp {
     }
 
     fn apply_live(&mut self, msg: &str) {
-        if self.write_config().is_ok() {
-            self.status_message = msg.to_string();
-        }
+        self.status_message = msg.to_string();
+        let _ = self.write_config();
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        // Non-blocking status sync from background thread (0ms overhead, never blocks UI!)
         self.sync_background_status();
 
         match message {
             Message::TabSelected(tab) => {
                 self.active_tab = tab;
             }
-            Message::ToggleGuide => {
-                self.active_tab = if self.active_tab == NavTab::Guide {
-                    NavTab::Connection
-                } else {
-                    NavTab::Guide
-                };
+            Message::GuideMethodSelected(m) => {
+                self.guide_method = m;
             }
             Message::SizeSelected(size) => {
                 self.selected_size = size;
@@ -816,18 +1075,15 @@ impl SettingsApp {
             }
             Message::OpacityChanged(val) => {
                 self.opacity = val;
-                let _ = self.write_config();
-                self.status_message = format!("Opacity set to {:.0}%", val * 100.0);
+                self.apply_live(&format!("Opacity set to {:.0}%", val * 100.0));
             }
             Message::MarginChanged(val) => {
                 self.margin_pct = val;
-                let _ = self.write_config();
-                self.status_message = format!("Edge margin set to {:.0}%", val * 100.0);
+                self.apply_live(&format!("Edge margin set to {:.0}%", val * 100.0));
             }
             Message::SensitivityChanged(val) => {
                 self.sensitivity = val;
-                let _ = self.write_config();
-                self.status_message = format!("Motion sensitivity set to {:.1}", val);
+                self.apply_live(&format!("Sensitivity set to {:.1}", val));
             }
             Message::AnimModeChanged(mode) => {
                 self.anim_mode = mode;
@@ -839,26 +1095,30 @@ impl SettingsApp {
             }
             Message::SensorSourceChanged(src) => {
                 self.sensor_source = src;
-                self.apply_live("Sensor source preference applied live");
+                self.apply_live("Sensor source updated live");
             }
             Message::OrientationChanged(orient) => {
                 self.orientation = orient;
-                self.apply_live("Sensor orientation applied live");
+                self.apply_live("Sensor orientation updated live");
             }
             Message::InvertXChanged(val) => {
                 self.invert_x = val;
-                self.apply_live("Lateral (X) axis inversion applied");
+                self.apply_live("Lateral (X) axis inversion updated");
             }
             Message::InvertYChanged(val) => {
                 self.invert_y = val;
-                self.apply_live("Forward (Y) axis inversion applied");
+                self.apply_live("Forward (Y) axis inversion updated");
             }
             Message::SimulateMotionChanged(val) => {
+                if val && !self.overlay_running {
+                    ensure_overlay_running();
+                    self.overlay_running = true;
+                }
                 self.simulate_motion = val;
                 self.apply_live(if val {
-                    "Desk Test Mode active — simulating vehicle motion"
+                    "Desk Test active — simulating vehicle motion"
                 } else {
-                    "Desk Test Mode stopped immediately"
+                    "Desk Test stopped immediately"
                 });
             }
             Message::AutostartChanged(val) => {
@@ -875,60 +1135,91 @@ impl SettingsApp {
             }
             Message::IpChanged(ip) => {
                 self.phone_ip = ip;
+                if self.sensor_source == SensorSourcePref::BuiltIn {
+                    self.sensor_source = SensorSourcePref::Auto;
+                }
+                if !self.overlay_running {
+                    ensure_overlay_running();
+                    self.overlay_running = true;
+                }
                 let clean = sanitize_ip_input(&self.phone_ip);
-                let _ = self.write_config();
-                self.status_message = format!("Connecting live to {clean}:8765...");
+                self.apply_live(&format!("Connecting live to {clean}:8765..."));
             }
             Message::SetUsbMode => {
+                ensure_overlay_running();
+                self.overlay_running = true;
                 self.phone_ip = "127.0.0.1".to_string();
-                self.sensor_source = SensorSourcePref::Phone;
-                self.apply_live("USB Mode (127.0.0.1:8765) activated — forwarding ADB port...");
-                std::thread::spawn(|| {
-                    let _ = new_silent_command("adb")
-                        .args(["forward", "tcp:8765", "tcp:8765"])
-                        .output();
+                self.sensor_source = SensorSourcePref::Auto;
+                self.apply_live("Running ADB port forward for USB Mode (127.0.0.1:8765)...");
+                let bg_clone = self.bg_state.clone();
+                std::thread::spawn(move || {
+                    let msg = match run_adb_forward() {
+                        Ok(ok_msg) => ok_msg,
+                        Err(err_msg) => err_msg,
+                    };
+                    if let Ok(mut guard) = bg_clone.lock() {
+                        guard.pending_toast = Some(msg);
+                    }
                 });
             }
-            Message::AutoDetectHotspot => {
-                if let Some(ip) = detect_windows_gateway_ip() {
-                    self.phone_ip = ip.clone();
-                    self.sensor_source = SensorSourcePref::Phone;
-                    self.apply_live(&format!("Hotspot gateway detected ({ip}:8765) & connected!"));
-                } else {
-                    self.status_message =
-                        "Could not detect gateway IP — enter your phone's IP manually".to_string();
+            Message::AutoDetectPhone => {
+                ensure_overlay_running();
+                self.overlay_running = true;
+                if self.sensor_source == SensorSourcePref::BuiltIn {
+                    self.sensor_source = SensorSourcePref::Auto;
                 }
+                self.status_message =
+                    "Scanning Hotspot, Wi-Fi & USB for phone on port 8765...".to_string();
+                let bg_clone = self.bg_state.clone();
+                std::thread::spawn(move || {
+                    let (found_ip, msg) = discover_phone_on_network();
+                    if let Ok(mut guard) = bg_clone.lock() {
+                        if let Some(ip) = found_ip {
+                            guard.discovered_ip = Some(ip);
+                        }
+                        guard.pending_toast = Some(msg);
+                    }
+                });
+            }
+            Message::TestConnection => {
+                ensure_overlay_running();
+                self.overlay_running = true;
+                let target = sanitize_ip_input(&self.phone_ip);
+                self.status_message = format!("Testing TCP connection to {target}:8765...");
+                let bg_clone = self.bg_state.clone();
+                std::thread::spawn(move || {
+                    let addr_str = format!("{target}:8765");
+                    let result_msg = if let Ok(ip) = target.parse::<Ipv4Addr>() {
+                        let sock = SocketAddr::V4(SocketAddrV4::new(ip, 8765));
+                        match TcpStream::connect_timeout(&sock, Duration::from_millis(1200)) {
+                            Ok(_) => format!(
+                                "Success! {addr_str} is open & streaming sensor data"
+                            ),
+                            Err(e) => format!(
+                                "Cannot reach {addr_str} ({}) — ensure Mewtion-Android is open",
+                                e.kind()
+                            ),
+                        }
+                    } else {
+                        format!("Invalid IPv4 address: {target}")
+                    };
+                    if let Ok(mut guard) = bg_clone.lock() {
+                        guard.pending_toast = Some(result_msg);
+                    }
+                });
             }
             Message::RefreshStatus => {
+                self.overlay_running = is_overlay_running();
                 self.sensor_status = read_sensor_status();
-                self.status_message = "Sensor connection status refreshed".to_string();
             }
             Message::ToggleOverlay(should_run) => {
                 self.overlay_running = should_run;
-                let bg_clone = self.bg_status.clone();
                 if !should_run {
-                    self.status_message = "Overlay stopped".to_string();
-                    std::thread::spawn(move || {
-                        let _ = new_silent_command("taskkill")
-                            .args(["/F", "/IM", "Mewtion.exe"])
-                            .output();
-                        if let Ok(mut guard) = bg_clone.lock() {
-                            guard.0 = false;
-                        }
-                    });
+                    stop_overlay_process();
+                    self.status_message = "Overlay paused".to_string();
                 } else {
-                    self.status_message = "Overlay launched".to_string();
-                    std::thread::spawn(move || {
-                        if let Some(overlay_path) = find_overlay_exe() {
-                            let _ = new_silent_command(
-                                overlay_path.to_str().unwrap_or("Mewtion.exe"),
-                            )
-                            .spawn();
-                            if let Ok(mut guard) = bg_clone.lock() {
-                                guard.0 = true;
-                            }
-                        }
-                    });
+                    ensure_overlay_running();
+                    self.status_message = "Overlay active".to_string();
                 }
             }
             Message::ResetDefaults => {
@@ -948,342 +1239,393 @@ impl SettingsApp {
             }
             Message::OpenUrl(url) => {
                 open_external_url(url);
-                self.status_message = format!("Opened guide in browser: {url}");
+                self.status_message = "Opened guide in default browser".to_string();
             }
         }
         Task::none()
     }
 
     fn view(&self) -> Element<'_, Message> {
-        // === 1. COMPACT HERO HEADER BAR WITH `?` SETUP GUIDE BUTTON ===
+        // === LEFT NAVIGATION SIDEBAR (WinUI 3 NavigationView Rail) ===
+        let brand_icon = container(
+            text("⋮⋮")
+                .font(FONT_SEGOE_SEMIBOLD)
+                .size(16)
+                .color(ACCENT_BLUE),
+        )
+        .width(Length::Fixed(34.0))
+        .height(Length::Fixed(34.0))
+        .center_x(Length::Fixed(34.0))
+        .center_y(Length::Fixed(34.0))
+        .style(|_| container::Style {
+            background: Some(BG_CARD.into()),
+            border: Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: BORDER_CARD,
+            },
+            ..Default::default()
+        });
+
+        let brand_header = row![
+            brand_icon,
+            column![
+                text("Mewtion")
+                    .font(FONT_SEGOE_SEMIBOLD)
+                    .size(17)
+                    .color(TEXT_PRIMARY),
+                text("Motion Cues")
+                    .size(11)
+                    .color(TEXT_SECONDARY),
+            ]
+            .spacing(1),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .padding([4, 6]);
+
+        let nav_items = column![
+            self.sidebar_item(NavTab::Connection, "Connection"),
+            self.sidebar_item(NavTab::Appearance, "Appearance"),
+            self.sidebar_item(NavTab::MotionAndDisplay, "Motion & Display"),
+            self.sidebar_item(NavTab::Calibration, "Calibration"),
+        ]
+        .spacing(4);
+
         let is_connected = self.sensor_status.starts_with("Connected")
             || self.sensor_status.starts_with("Active:");
-
-        let status_dot_color = if !self.overlay_running {
-            COLOR_RED
+        let dot_color = if !self.overlay_running {
+            STATUS_RED
         } else if is_connected {
-            COLOR_GREEN
+            STATUS_GREEN
         } else {
-            COLOR_YELLOW
+            STATUS_AMBER
+        };
+        let short_state = if !self.overlay_running {
+            "Overlay Off"
+        } else if is_connected {
+            "Connected"
+        } else {
+            "Waiting for Phone"
         };
 
         let status_dot = container(text(""))
-            .width(Length::Fixed(9.0))
-            .height(Length::Fixed(9.0))
+            .width(Length::Fixed(8.0))
+            .height(Length::Fixed(8.0))
             .style(move |_| container::Style {
-                background: Some(status_dot_color.into()),
+                background: Some(dot_color.into()),
                 border: Border {
-                    radius: 4.5.into(),
+                    radius: 4.0.into(),
                     ..Default::default()
                 },
                 ..Default::default()
             });
 
-        let status_str = if self.overlay_running {
-            self.sensor_status.as_str()
-        } else {
-            "Overlay stopped"
-        };
-
-        let hero_left = column![
+        let status_pill = container(
             row![
-                text("Mewtion")
-                    .font(FONT_SEGOE_SEMIBOLD)
-                    .size(21)
-                    .color(WIN_TEXT_PRIMARY),
-                container(
-                    text("Windows 11")
-                        .font(FONT_SEGOE_SEMIBOLD)
-                        .size(10)
-                        .color(WIN_ACCENT)
-                )
-                .padding([2, 7])
-                .style(|_| container::Style {
-                    background: Some(WIN_CARD_HEADER.into()),
-                    border: Border {
-                        radius: 4.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
+                status_dot,
+                text(short_state)
+                    .size(11)
+                    .color(TEXT_SECONDARY)
+                    .width(Length::Fill),
+                button(text("↻").size(11).color(TEXT_SECONDARY))
+                    .on_press(Message::RefreshStatus)
+                    .padding([2, 6])
+                    .style(ghost_button_style),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
-            row![
-                status_dot,
-                text(status_str).size(12).color(WIN_TEXT_SECONDARY),
-                button(text("↻").size(12).color(WIN_TEXT_PRIMARY))
-                    .on_press(Message::RefreshStatus)
-                    .padding([2, 7])
-                    .style(subtle_button_style),
-            ]
-            .spacing(7)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(4)
-        .width(Length::Fill);
-
-        let is_guide_open = self.active_tab == NavTab::Guide;
-        let help_btn = button(
-            row![
-                text("?").font(FONT_SEGOE_SEMIBOLD).size(13).color(if is_guide_open {
-                    WIN_ACCENT_DARK_TEXT
-                } else {
-                    WIN_ACCENT
-                }),
-                text("Setup Guide").size(12).color(if is_guide_open {
-                    WIN_ACCENT_DARK_TEXT
-                } else {
-                    WIN_TEXT_PRIMARY
-                }),
-            ]
-            .spacing(5)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::ToggleGuide)
-        .padding([6, 11])
-        .style(move |theme, status| {
-            if is_guide_open {
-                accent_button_style(theme, status)
-            } else {
-                subtle_button_style(theme, status)
-            }
-        });
-
-        let overlay_switch = row![
-            help_btn,
-            column![
-                text(if self.overlay_running {
-                    "Overlay On"
-                } else {
-                    "Overlay Off"
-                })
-                .size(11)
-                .color(WIN_TEXT_SECONDARY),
-                toggler(self.overlay_running)
-                    .on_toggle(Message::ToggleOverlay)
-                    .size(20.0)
-                    .style(fluent_toggler_style),
-            ]
-            .spacing(3)
-            .align_x(Alignment::End),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center);
-
-        let header_card = fluent_card(
-            row![hero_left, overlay_switch]
-                .align_y(Alignment::Center)
-                .into(),
-        );
-
-        // === 2. SEGMENTED NAVIGATION BAR (Eliminates Long Page Scrolling) ===
-        let nav_bar = container(
-            row![
-                self.nav_tab_button(NavTab::Connection, "Connection & Sensor"),
-                self.nav_tab_button(NavTab::Appearance, "Appearance"),
-                self.nav_tab_button(NavTab::MotionAndSystem, "Motion & System"),
-                self.nav_tab_button(NavTab::Guide, "? Connection Guide"),
-            ]
-            .spacing(6),
         )
         .width(Length::Fill)
-        .padding(4)
+        .padding([8, 10])
         .style(|_| container::Style {
-            background: Some(WIN_INPUT_BG.into()),
+            background: Some(BG_CONTENT.into()),
             border: Border {
-                radius: 8.0.into(),
+                radius: 6.0.into(),
                 width: 1.0,
-                color: WIN_CARD_BORDER,
+                color: BORDER_CARD,
             },
             ..Default::default()
         });
 
-        // === 3. ACTIVE TAB CONTENT ===
-        let tab_content: Element<'_, Message> = match self.active_tab {
-            NavTab::Connection => self.view_connection_tab(),
-            NavTab::Appearance => self.view_appearance_tab(),
-            NavTab::MotionAndSystem => self.view_motion_system_tab(),
-            NavTab::Guide => self.view_guide_tab(),
+        let sidebar = container(
+            column![
+                brand_header,
+                container(text("")).height(Length::Fixed(8.0)),
+                nav_items,
+                container(text("")).height(Length::Fill),
+                self.sidebar_item(NavTab::Guide, "?   Setup Guide"),
+                status_pill,
+            ]
+            .spacing(8)
+            .padding([18, 14]),
+        )
+        .width(Length::Fixed(205.0))
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(BG_SIDEBAR.into()),
+            ..Default::default()
+        });
+
+        // === RIGHT MAIN CONTENT WORKSPACE ===
+        let (page_title, page_subtitle) = match self.active_tab {
+            NavTab::Connection => (
+                "Connection",
+                "Connect your Android phone over Hotspot, Wi-Fi, or USB",
+            ),
+            NavTab::Appearance => (
+                "Appearance",
+                "Customize the size, color, opacity, and screen placement of motion dots",
+            ),
+            NavTab::MotionAndDisplay => (
+                "Motion & Display",
+                "Tune acceleration sensitivity, physics style, and multi-monitor behavior",
+            ),
+            NavTab::Calibration => (
+                "Calibration",
+                "Align sensor axes with how your phone or device is positioned",
+            ),
+            NavTab::Guide => (
+                "Connection Setup Guide",
+                "Choose how you want to connect your Android phone to Windows",
+            ),
         };
 
-        // === 4. LIVE STATUS FOOTER BAR (No Manual "Apply" Needed!) ===
-        let footer_row = row![
-            text(&self.status_message)
-                .size(12)
-                .color(WIN_ACCENT)
-                .width(Length::Fill),
-            button(text("Reset Defaults").size(11).color(WIN_TEXT_SECONDARY))
-                .on_press(Message::ResetDefaults)
-                .padding([5, 10])
-                .style(subtle_button_style),
+        let top_controls = row![
+            button(
+                row![
+                    text(if self.simulate_motion { "■" } else { "▶" })
+                        .size(10)
+                        .color(if self.simulate_motion {
+                            ACCENT_DARK_TEXT
+                        } else {
+                            ACCENT_BLUE
+                        }),
+                    text(if self.simulate_motion {
+                        "Stop Desk Test"
+                    } else {
+                        "Desk Test"
+                    })
+                    .font(FONT_SEGOE_SEMIBOLD)
+                    .size(12)
+                    .color(if self.simulate_motion {
+                        ACCENT_DARK_TEXT
+                    } else {
+                        TEXT_PRIMARY
+                    }),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::SimulateMotionChanged(!self.simulate_motion))
+            .padding([6, 12])
+            .style(if self.simulate_motion {
+                accent_button_style
+            } else {
+                secondary_button_style
+            }),
+            container(
+                row![
+                    text(if self.overlay_running {
+                        "Overlay On"
+                    } else {
+                        "Overlay Off"
+                    })
+                    .size(12)
+                    .color(TEXT_PRIMARY),
+                    toggler(self.overlay_running)
+                        .on_toggle(Message::ToggleOverlay)
+                        .size(19.0)
+                        .style(fluent_toggler_style),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([5, 10])
+            .style(|_| container::Style {
+                background: Some(BG_CARD.into()),
+                border: Border {
+                    radius: 6.0.into(),
+                    width: 1.0,
+                    color: BORDER_CARD,
+                },
+                ..Default::default()
+            }),
         ]
-        .spacing(10)
+        .spacing(8)
         .align_y(Alignment::Center);
 
-        let main_column = column![
-            header_card,
-            nav_bar,
-            scrollable(container(tab_content).width(Length::Fill)).height(Length::Fill),
-            footer_row,
+        let page_header = row![
+            column![
+                text(page_title)
+                    .font(FONT_SEGOE_SEMIBOLD)
+                    .size(22)
+                    .color(TEXT_PRIMARY),
+                text(page_subtitle).size(12).color(TEXT_SECONDARY),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            top_controls,
         ]
-        .spacing(10)
-        .padding([16, 20]);
+        .align_y(Alignment::Center);
 
-        container(main_column)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(WIN_BG_MICA.into()),
-                text_color: Some(WIN_TEXT_PRIMARY),
-                ..Default::default()
-            })
-            .into()
+        let page_body: Element<'_, Message> = match self.active_tab {
+            NavTab::Connection => self.view_connection_page(),
+            NavTab::Appearance => self.view_appearance_page(),
+            NavTab::MotionAndDisplay => self.view_motion_page(),
+            NavTab::Calibration => self.view_calibration_page(),
+            NavTab::Guide => self.view_guide_page(),
+        };
+
+        let footer_bar = row![
+            text(&self.status_message)
+                .size(11)
+                .color(TEXT_MUTED)
+                .width(Length::Fill),
+            button(text("Reset Defaults").size(11).color(TEXT_SECONDARY))
+                .on_press(Message::ResetDefaults)
+                .padding([4, 10])
+                .style(ghost_button_style),
+        ]
+        .align_y(Alignment::Center);
+
+        let content_pane = container(
+            column![
+                page_header,
+                container(page_body).width(Length::Fill).height(Length::Fill),
+                footer_bar,
+            ]
+            .spacing(14)
+            .padding([20, 24]),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(BG_CONTENT.into()),
+            border: Border {
+                radius: 10.0.into(),
+                width: 1.0,
+                color: BORDER_CARD,
+            },
+            ..Default::default()
+        });
+
+        container(
+            row![
+                sidebar,
+                container(content_pane)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding([8, 8]),
+            ],
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(BG_SIDEBAR.into()),
+            text_color: Some(TEXT_PRIMARY),
+            ..Default::default()
+        })
+        .into()
     }
 
-    fn view_connection_tab(&self) -> Element<'_, Message> {
-        let ip_input = text_input("e.g. 192.168.43.1 or 192.168.1.42", &self.phone_ip)
+    fn view_connection_page(&self) -> Element<'_, Message> {
+        let ip_input = text_input("192.168.43.1 or 127.0.0.1", &self.phone_ip)
             .on_input(Message::IpChanged)
-            .padding([8, 12])
+            .padding([7, 12])
             .size(13)
+            .width(Length::Fixed(190.0))
             .style(fluent_text_input_style);
 
-        let connection_card = fluent_card(
+        let ip_card = settings_card(
             column![
-                setting_row(
-                    "Sensor Source",
-                    "Auto uses your Android phone whenever connected, or falls back to built-in sensors",
-                    pick_list(
-                        &[
-                            SensorSourcePref::Auto,
-                            SensorSourcePref::Phone,
-                            SensorSourcePref::BuiltIn,
-                        ][..],
-                        Some(self.sensor_source),
-                        Message::SensorSourceChanged,
+                row![
+                    column![
+                        text("Android Phone Address")
+                            .font(FONT_SEGOE_SEMIBOLD)
+                            .size(13)
+                            .color(TEXT_PRIMARY),
+                        text("Click 'Auto-Find Phone' to scan Wi-Fi, Hotspot & USB automatically")
+                            .size(11)
+                            .color(TEXT_SECONDARY),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    button(
+                        text("Auto-Find Phone")
+                            .font(FONT_SEGOE_SEMIBOLD)
+                            .size(12)
+                            .color(ACCENT_DARK_TEXT)
                     )
-                    .width(Length::Fixed(195.0))
-                    .padding([6, 10])
-                    .style(fluent_pick_list_style)
-                    .into(),
-                ),
-                divider(),
-                column![
-                    row![
-                        column![
-                            text("Android Companion IP Address")
-                                .font(FONT_SEGOE_SEMIBOLD)
-                                .size(13)
-                                .color(WIN_TEXT_PRIMARY),
-                            text("Applies automatically as you type — port 8765 is handled for you")
-                                .size(11)
-                                .color(WIN_TEXT_SECONDARY),
-                        ]
-                        .spacing(2)
-                        .width(Length::Fill),
-                        button(
-                            text("Need Help? (?)")
-                                .font(FONT_SEGOE_SEMIBOLD)
-                                .size(11)
-                                .color(WIN_ACCENT)
-                        )
-                        .on_press(Message::TabSelected(NavTab::Guide))
-                        .padding([5, 10])
-                        .style(subtle_button_style),
-                    ]
-                    .align_y(Alignment::Center),
-                    row![
-                        ip_input,
-                        button(
-                            text("Detect Hotspot")
-                                .font(FONT_SEGOE_SEMIBOLD)
-                                .size(12)
-                                .color(WIN_ACCENT_DARK_TEXT)
-                        )
-                        .on_press(Message::AutoDetectHotspot)
-                        .padding([8, 12])
-                        .style(accent_button_style),
-                        button(text("USB (ADB)").size(12).color(WIN_TEXT_PRIMARY))
-                            .on_press(Message::SetUsbMode)
-                            .padding([8, 12])
-                            .style(subtle_button_style),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
+                    .on_press(Message::AutoDetectPhone)
+                    .padding([7, 14])
+                    .style(accent_button_style),
                 ]
-                .spacing(8),
-                divider(),
-                setting_row(
-                    "Simulate Motion (Desk Test Mode)",
-                    "Test the overlay dots right now at your desk without a phone connected",
-                    toggler(self.simulate_motion)
-                        .on_toggle(Message::SimulateMotionChanged)
-                        .size(20.0)
-                        .style(fluent_toggler_style)
-                        .into(),
-                ),
+                .align_y(Alignment::Center),
+                row![
+                    ip_input,
+                    button(text("USB Mode (ADB)").size(12).color(TEXT_PRIMARY))
+                        .on_press(Message::SetUsbMode)
+                        .padding([7, 12])
+                        .style(secondary_button_style),
+                    button(text("Test Port 8765").size(12).color(TEXT_PRIMARY))
+                        .on_press(Message::TestConnection)
+                        .padding([7, 12])
+                        .style(secondary_button_style),
+                    button(text("Setup Guide →").size(12).color(ACCENT_BLUE))
+                        .on_press(Message::TabSelected(NavTab::Guide))
+                        .padding([7, 10])
+                        .style(ghost_button_style),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
             ]
             .spacing(12)
             .into(),
         );
 
-        let calibration_card = fluent_card(
-            column![
-                setting_row(
-                    "Phone / Sensor Orientation",
-                    "Rotate axes if your phone is placed sideways in the vehicle",
-                    pick_list(
-                        &[
-                            Orientation::Deg0,
-                            Orientation::Deg90,
-                            Orientation::Deg180,
-                            Orientation::Deg270,
-                        ][..],
-                        Some(self.orientation),
-                        Message::OrientationChanged,
-                    )
-                    .width(Length::Fixed(195.0))
-                    .padding([6, 10])
-                    .style(fluent_pick_list_style)
-                    .into(),
-                ),
-                divider(),
-                setting_row(
-                    "Invert Lateral Axis (X)",
-                    "Reverse left/right dot movement during turns",
-                    toggler(self.invert_x)
-                        .on_toggle(Message::InvertXChanged)
-                        .size(20.0)
-                        .style(fluent_toggler_style)
-                        .into(),
-                ),
-                divider(),
-                setting_row(
-                    "Invert Forward Axis (Y)",
-                    "Reverse forward/backward dot movement during braking & acceleration",
-                    toggler(self.invert_y)
-                        .on_toggle(Message::InvertYChanged)
-                        .size(20.0)
-                        .style(fluent_toggler_style)
-                        .into(),
-                ),
+        let source_pills = segmented_container(
+            row![
+                self.source_pill(SensorSourcePref::Auto, "Auto"),
+                self.source_pill(SensorSourcePref::Phone, "Phone Only"),
+                self.source_pill(SensorSourcePref::BuiltIn, "PC Sensor"),
             ]
-            .spacing(11)
+            .spacing(2)
             .into(),
         );
 
-        column![connection_card, calibration_card]
-            .spacing(10)
-            .into()
+        let source_card = settings_row_card(
+            "Sensor Input Source",
+            "Auto uses your Android phone whenever connected, or falls back to PC sensors",
+            source_pills,
+        );
+
+        let status_str = if self.overlay_running {
+            self.sensor_status.as_str()
+        } else {
+            "Overlay is currently paused — toggle 'Overlay On' above to resume"
+        };
+
+        let diag_card = settings_row_card(
+            "Live Bridge Status",
+            status_str,
+            button(text("Test Connection").size(12).color(TEXT_PRIMARY))
+                .on_press(Message::TestConnection)
+                .padding([6, 12])
+                .style(secondary_button_style)
+                .into(),
+        );
+
+        column![ip_card, source_card, diag_card].spacing(10).into()
     }
 
-    fn view_appearance_tab(&self) -> Element<'_, Message> {
+    fn view_appearance_page(&self) -> Element<'_, Message> {
         let dot_px = self.selected_size.pixels();
         let dot_color = Color {
             a: self.opacity,
             ..self.selected_color.to_color()
         };
-        let make_edge_dot = |sz: f32| {
+        let make_dot = |sz: f32| {
             container(text(""))
                 .width(Length::Fixed(sz))
                 .height(Length::Fixed(sz))
@@ -1297,67 +1639,49 @@ impl SettingsApp {
                 })
         };
 
-        let mini_screen = container(
+        let size_pills = segmented_container(
             row![
-                column![
-                    make_edge_dot(dot_px * 0.65),
-                    make_edge_dot(dot_px),
-                    make_edge_dot(dot_px * 0.65)
-                ]
-                .spacing(6)
-                .align_x(Alignment::Center),
-                container(
-                    column![
-                        text("LIVE OVERLAY PREVIEW")
-                            .font(FONT_SEGOE_SEMIBOLD)
-                            .size(11)
-                            .color(WIN_TEXT_SECONDARY),
-                        text(format!(
-                            "{} • {:.0}% Opacity • {}% Margin",
-                            self.selected_size.label(),
-                            self.opacity * 100.0,
-                            (self.margin_pct * 100.0).round() as i32
-                        ))
-                        .size(12)
-                        .color(WIN_TEXT_PRIMARY),
-                    ]
-                    .spacing(2)
-                    .align_x(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-                column![
-                    make_edge_dot(dot_px * 0.65),
-                    make_edge_dot(dot_px),
-                    make_edge_dot(dot_px * 0.65)
-                ]
-                .spacing(6)
-                .align_x(Alignment::Center),
+                self.size_pill(DotSize::Small, "Small"),
+                self.size_pill(DotSize::Medium, "Medium"),
+                self.size_pill(DotSize::Large, "Large"),
             ]
+            .spacing(2)
+            .into(),
+        );
+
+        let size_card = settings_card(
+            row![
+                row![
+                    make_dot(dot_px * 0.65),
+                    make_dot(dot_px),
+                    make_dot(dot_px * 0.65),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+                column![
+                    text("Dot Size")
+                        .font(FONT_SEGOE_SEMIBOLD)
+                        .size(13)
+                        .color(TEXT_PRIMARY),
+                    text(format!(
+                        "{} • {:.0}% Opacity • {}% Margin",
+                        self.selected_size.label(),
+                        self.opacity * 100.0,
+                        (self.margin_pct * 100.0).round() as i32
+                    ))
+                    .size(11)
+                    .color(TEXT_SECONDARY),
+                ]
+                .spacing(2)
+                .width(Length::Fill),
+                size_pills,
+            ]
+            .spacing(14)
             .align_y(Alignment::Center)
-            .padding([8, 16]),
-        )
-        .width(Length::Fill)
-        .height(Length::Fixed(66.0))
-        .style(|_| container::Style {
-            background: Some(WIN_INPUT_BG.into()),
-            border: Border {
-                radius: 6.0.into(),
-                width: 1.0,
-                color: WIN_CARD_BORDER,
-            },
-            ..Default::default()
-        });
+            .into(),
+        );
 
-        let sizes_row = row![
-            self.segmented_size_button(DotSize::Small),
-            self.segmented_size_button(DotSize::Medium),
-            self.segmented_size_button(DotSize::Large),
-        ]
-        .spacing(6);
-
-        let colors_row = row![
+        let swatches = row![
             self.color_swatch(DotColor::White),
             self.color_swatch(DotColor::Blue),
             self.color_swatch(DotColor::Cyan),
@@ -1366,303 +1690,344 @@ impl SettingsApp {
             self.color_swatch(DotColor::Purple),
             self.color_swatch(DotColor::Red),
         ]
-        .spacing(10);
+        .spacing(8);
 
-        fluent_card(
-            column![
-                mini_screen,
-                divider(),
-                setting_row(
-                    "Dot Size",
-                    "Diameter of edge motion cues on screen",
-                    sizes_row.into()
-                ),
-                divider(),
-                setting_row(
-                    "Dot Color",
-                    "High-contrast tint for your desktop wallpaper",
-                    colors_row.into()
-                ),
-                divider(),
-                slider_setting_row(
-                    "Opacity",
-                    "Transparency of motion dots",
-                    format!("{:.0}%", self.opacity * 100.0),
-                    slider(0.1..=1.0, self.opacity, Message::OpacityChanged)
-                        .step(0.05_f32)
-                        .style(fluent_slider_style)
-                        .into(),
-                ),
-                divider(),
-                slider_setting_row(
-                    "Screen Edge Margin",
-                    "Distance from the left and right edges of your display",
-                    format!("{:.0}%", self.margin_pct * 100.0),
-                    slider(0.0..=0.15, self.margin_pct, Message::MarginChanged)
-                        .step(0.01_f32)
-                        .style(fluent_slider_style)
-                        .into(),
-                ),
-            ]
-            .spacing(12)
-            .into(),
-        )
-    }
-
-    fn view_motion_system_tab(&self) -> Element<'_, Message> {
-        let motion_card = fluent_card(
-            column![
-                slider_setting_row(
-                    "Motion Sensitivity",
-                    "Lower values react more strongly to gentle turns and acceleration",
-                    format!("{:.1}", self.sensitivity),
-                    slider(1.0..=10.0, self.sensitivity, Message::SensitivityChanged)
-                        .step(0.5_f32)
-                        .style(fluent_slider_style)
-                        .into(),
-                ),
-                divider(),
-                setting_row(
-                    "Animation Style",
-                    "Fluid varies dot sizes organically; Rigid keeps uniform dots",
-                    pick_list(
-                        &[AnimMode::Fluid, AnimMode::Rigid][..],
-                        Some(self.anim_mode),
-                        Message::AnimModeChanged,
-                    )
-                    .width(Length::Fixed(185.0))
-                    .padding([6, 10])
-                    .style(fluent_pick_list_style)
-                    .into(),
-                ),
-                divider(),
-                setting_row(
-                    "Display Target",
-                    "Render cues on your primary monitor or across all monitors",
-                    pick_list(
-                        &[MonitorTarget::Primary, MonitorTarget::All][..],
-                        Some(self.monitor_target),
-                        Message::MonitorTargetChanged,
-                    )
-                    .width(Length::Fixed(185.0))
-                    .padding([6, 10])
-                    .style(fluent_pick_list_style)
-                    .into(),
-                ),
-            ]
-            .spacing(12)
-            .into(),
+        let color_card = settings_row_card(
+            "Dot Color",
+            "Choose a high-contrast tint that stands out against your desktop",
+            swatches.into(),
         );
 
-        let system_card = fluent_card(
-            column![
-                setting_row(
-                    "Start Mewtion with Windows",
-                    "Automatically launch the motion cues overlay when you sign in",
-                    toggler(self.autostart_windows)
-                        .on_toggle(Message::AutostartChanged)
-                        .size(20.0)
-                        .style(fluent_toggler_style)
-                        .into(),
-                ),
-                divider(),
-                setting_row(
-                    "Simulate Motion (Desk Test Mode)",
-                    "Preview smooth figure-8 vehicle motion while stationary",
-                    toggler(self.simulate_motion)
-                        .on_toggle(Message::SimulateMotionChanged)
-                        .size(20.0)
-                        .style(fluent_toggler_style)
-                        .into(),
-                ),
-            ]
-            .spacing(12)
-            .into(),
+        let opacity_card = slider_card(
+            "Dot Opacity",
+            "Transparency of the motion cues overlay",
+            format!("{:.0}%", self.opacity * 100.0),
+            slider(0.1..=1.0, self.opacity, Message::OpacityChanged)
+                .step(0.05_f32)
+                .width(Length::Fixed(180.0))
+                .style(fluent_slider_style)
+                .into(),
         );
 
-        column![motion_card, system_card].spacing(10).into()
-    }
+        let margin_card = slider_card(
+            "Screen Edge Margin",
+            "Horizontal inset from the left and right edges of your screen",
+            format!("{:.0}%", self.margin_pct * 100.0),
+            slider(0.0..=0.15, self.margin_pct, Message::MarginChanged)
+                .step(0.01_f32)
+                .width(Length::Fixed(180.0))
+                .style(fluent_slider_style)
+                .into(),
+        );
 
-    fn view_guide_tab(&self) -> Element<'_, Message> {
-        let companion_card = fluent_card(
-            row![
-                column![
-                    text("Step 0: Install Mewtion-Android on Your Phone")
-                        .font(FONT_SEGOE_SEMIBOLD)
-                        .size(13)
-                        .color(WIN_TEXT_PRIMARY),
-                    text("Open the app on your Android phone and tap 'Start Service' so it listens on port 8765.")
-                        .size(11)
-                        .color(WIN_TEXT_SECONDARY),
-                ]
-                .spacing(2)
-                .width(Length::Fill),
-                button(
-                    text("Download App ↗")
-                        .font(FONT_SEGOE_SEMIBOLD)
-                        .size(11)
-                        .color(WIN_ACCENT_DARK_TEXT)
-                )
-                .on_press(Message::OpenUrl(
-                    "https://github.com/aayuxh-vim/Mewtion-Android/releases"
-                ))
-                .padding([6, 12])
-                .style(accent_button_style),
-            ]
+        column![size_card, color_card, opacity_card, margin_card]
             .spacing(10)
-            .align_y(Alignment::Center)
-            .into(),
-        );
-
-        let hotspot_card = fluent_card(
-            column![
-                row![
-                    column![
-                        text("Method 1: Mobile Hotspot (Easiest Wireless)")
-                            .font(FONT_SEGOE_SEMIBOLD)
-                            .size(13)
-                            .color(WIN_ACCENT),
-                        text("1. Turn on Mobile Hotspot on your Android phone and connect your Windows laptop to it.")
-                            .size(11)
-                            .color(WIN_TEXT_PRIMARY),
-                        text("2. Open Mewtion-Android on your phone and tap 'Start Service'.")
-                            .size(11)
-                            .color(WIN_TEXT_PRIMARY),
-                        text("3. Click 'Auto-Detect Hotspot' — Mewtion will find your phone's gateway IP and connect!")
-                            .size(11)
-                            .color(WIN_TEXT_SECONDARY),
-                    ]
-                    .spacing(3)
-                    .width(Length::Fill),
-                    button(
-                        text("Auto-Detect Hotspot")
-                            .font(FONT_SEGOE_SEMIBOLD)
-                            .size(11)
-                            .color(WIN_ACCENT_DARK_TEXT)
-                    )
-                    .on_press(Message::AutoDetectHotspot)
-                    .padding([7, 12])
-                    .style(accent_button_style),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            ]
-            .into(),
-        );
-
-        let wifi_card = fluent_card(
-            column![
-                text("Method 2: Same Wi-Fi Network")
-                    .font(FONT_SEGOE_SEMIBOLD)
-                    .size(13)
-                    .color(WIN_ACCENT),
-                text("1. Connect both your Windows PC and Android phone to the same Wi-Fi router.")
-                    .size(11)
-                    .color(WIN_TEXT_PRIMARY),
-                text("2. Look at the IP address shown inside the Mewtion-Android app (e.g. 192.168.1.42:8765).")
-                    .size(11)
-                    .color(WIN_TEXT_PRIMARY),
-                text("3. Type that IP in the 'Connection & Sensor' tab (you can include or omit :8765 — it connects live!).")
-                    .size(11)
-                    .color(WIN_TEXT_PRIMARY),
-                text("Tip: Set your Wi-Fi network profile in Windows Settings to 'Private' so Windows Firewall doesn't block it.")
-                    .size(11)
-                    .color(WIN_TEXT_SECONDARY),
-            ]
-            .spacing(3)
-            .into(),
-        );
-
-        let usb_card = fluent_card(
-            column![
-                text("Method 3: USB Cable via ADB (Zero Latency + Charges Phone)")
-                    .font(FONT_SEGOE_SEMIBOLD)
-                    .size(13)
-                    .color(WIN_ACCENT),
-                text("1. On your Android phone, open Settings → About Phone and tap 'Build Number' 7 times.")
-                    .size(11)
-                    .color(WIN_TEXT_PRIMARY),
-                text("2. Go to Settings → System → Developer Options and enable 'USB Debugging'.")
-                    .size(11)
-                    .color(WIN_TEXT_PRIMARY),
-                text("3. Install Google SDK Platform-Tools (ADB) on Windows, plug in your phone via USB, and tap 'Allow' on the phone prompt.")
-                    .size(11)
-                    .color(WIN_TEXT_PRIMARY),
-                text("4. Click 'Activate USB Mode (ADB)' below to forward port 8765 over USB (127.0.0.1).")
-                    .size(11)
-                    .color(WIN_TEXT_SECONDARY),
-                row![
-                    button(
-                        text("USB Debugging Guide ↗")
-                            .size(11)
-                            .color(WIN_TEXT_PRIMARY)
-                    )
-                    .on_press(Message::OpenUrl(
-                        "https://developer.android.com/studio/debug/dev-options"
-                    ))
-                    .padding([6, 10])
-                    .style(subtle_button_style),
-                    button(
-                        text("Download ADB Tools ↗")
-                            .size(11)
-                            .color(WIN_TEXT_PRIMARY)
-                    )
-                    .on_press(Message::OpenUrl(
-                        "https://developer.android.com/tools/releases/platform-tools"
-                    ))
-                    .padding([6, 10])
-                    .style(subtle_button_style),
-                    button(
-                        text("Activate USB Mode (ADB)")
-                            .font(FONT_SEGOE_SEMIBOLD)
-                            .size(11)
-                            .color(WIN_ACCENT_DARK_TEXT)
-                    )
-                    .on_press(Message::SetUsbMode)
-                    .padding([6, 12])
-                    .style(accent_button_style),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            ]
-            .spacing(5)
-            .into(),
-        );
-
-        column![companion_card, hotspot_card, wifi_card, usb_card]
-            .spacing(8)
             .into()
     }
 
-    fn nav_tab_button(&self, tab: NavTab, label: &'static str) -> Element<'_, Message> {
-        let is_selected = self.active_tab == tab;
+    fn view_motion_page(&self) -> Element<'_, Message> {
+        let sens_card = slider_card(
+            "Motion Sensitivity",
+            "Lower values react more strongly to gentle turns and braking",
+            format!("{:.1}", self.sensitivity),
+            slider(1.0..=10.0, self.sensitivity, Message::SensitivityChanged)
+                .step(0.5_f32)
+                .width(Length::Fixed(180.0))
+                .style(fluent_slider_style)
+                .into(),
+        );
+
+        let anim_pills = segmented_container(
+            row![
+                self.anim_pill(AnimMode::Fluid, "Fluid"),
+                self.anim_pill(AnimMode::Rigid, "Rigid"),
+            ]
+            .spacing(2)
+            .into(),
+        );
+
+        let anim_card = settings_row_card(
+            "Animation Style",
+            "Fluid varies particle sizes organically; Rigid keeps uniform dots",
+            anim_pills,
+        );
+
+        let mon_pills = segmented_container(
+            row![
+                self.monitor_pill(MonitorTarget::Primary, "Primary"),
+                self.monitor_pill(MonitorTarget::All, "All Displays"),
+            ]
+            .spacing(2)
+            .into(),
+        );
+
+        let mon_card = settings_row_card(
+            "Display Target",
+            "Render motion cues on your primary monitor or across all displays",
+            mon_pills,
+        );
+
+        let startup_card = settings_row_card(
+            "Launch on Windows Startup",
+            "Automatically start the Mewtion overlay in the system tray when you sign in",
+            toggler(self.autostart_windows)
+                .on_toggle(Message::AutostartChanged)
+                .size(20.0)
+                .style(fluent_toggler_style)
+                .into(),
+        );
+
+        column![sens_card, anim_card, mon_card, startup_card]
+            .spacing(10)
+            .into()
+    }
+
+    fn view_calibration_page(&self) -> Element<'_, Message> {
+        let orient_pills = segmented_container(
+            row![
+                self.orient_pill(Orientation::Deg0, "0°"),
+                self.orient_pill(Orientation::Deg90, "90°"),
+                self.orient_pill(Orientation::Deg180, "180°"),
+                self.orient_pill(Orientation::Deg270, "270°"),
+            ]
+            .spacing(2)
+            .into(),
+        );
+
+        let orient_card = settings_row_card(
+            "Phone / Sensor Orientation",
+            "Rotate sensor axes if your phone rests sideways (90° / 270°) or inverted (180°)",
+            orient_pills,
+        );
+
+        let inv_x_card = settings_row_card(
+            "Invert Lateral Axis (Left / Right)",
+            "Reverse horizontal dot drift during left and right turns",
+            toggler(self.invert_x)
+                .on_toggle(Message::InvertXChanged)
+                .size(20.0)
+                .style(fluent_toggler_style)
+                .into(),
+        );
+
+        let inv_y_card = settings_row_card(
+            "Invert Forward Axis (Acceleration / Braking)",
+            "Reverse vertical dot drift during acceleration and braking",
+            toggler(self.invert_y)
+                .on_toggle(Message::InvertYChanged)
+                .size(20.0)
+                .style(fluent_toggler_style)
+                .into(),
+        );
+
+        column![orient_card, inv_x_card, inv_y_card]
+            .spacing(10)
+            .into()
+    }
+
+    fn view_guide_page(&self) -> Element<'_, Message> {
+        let method_tabs = segmented_container(
+            row![
+                self.guide_method_pill(GuideMethod::Hotspot, "1. Mobile Hotspot (Recommended)"),
+                self.guide_method_pill(GuideMethod::Wifi, "2. Same Wi-Fi Router"),
+                self.guide_method_pill(GuideMethod::Usb, "3. USB Cable (ADB)"),
+            ]
+            .spacing(2)
+            .into(),
+        );
+
+        let method_card: Element<'_, Message> = match self.guide_method {
+            GuideMethod::Hotspot => settings_card(
+                column![
+                    guide_step_row(
+                        "1",
+                        "Install & Open Mewtion-Android on Your Phone",
+                        "Install the Android companion app and open it so 'Mewtion Bridge Active' appears on screen.",
+                    ),
+                    guide_step_row(
+                        "2",
+                        "Connect Your Windows Laptop to Your Phone's Hotspot",
+                        "Turn on Wi-Fi Hotspot on your phone and connect Windows to it. Set the Windows network profile to 'Private' if prompted.",
+                    ),
+                    guide_step_row(
+                        "3",
+                        "Click 'Auto-Find Phone' Below",
+                        "Note: On Pixel / Android 14+ phones, the app screen may show your mobile data IP (10.x.x.x) instead of the hotspot IP. 'Auto-Find Phone' scans the hotspot subnet and finds your phone automatically!",
+                    ),
+                    row![
+                        button(
+                            text("Download Android App ↗")
+                                .size(12)
+                                .color(TEXT_PRIMARY)
+                        )
+                        .on_press(Message::OpenUrl(
+                            "https://github.com/aayuxh-vim/Mewtion-Android/releases"
+                        ))
+                        .padding([7, 14])
+                        .style(secondary_button_style),
+                        button(
+                            text("Auto-Find Phone on Hotspot")
+                                .font(FONT_SEGOE_SEMIBOLD)
+                                .size(12)
+                                .color(ACCENT_DARK_TEXT)
+                        )
+                        .on_press(Message::AutoDetectPhone)
+                        .padding([7, 16])
+                        .style(accent_button_style),
+                    ]
+                    .spacing(10),
+                ]
+                .spacing(14)
+                .into(),
+            ),
+            GuideMethod::Wifi => settings_card(
+                column![
+                    guide_step_row(
+                        "1",
+                        "Connect Phone & PC to the Same Wi-Fi Router",
+                        "Ensure your Wi-Fi network in Windows Settings → Network & Internet is set to 'Private network' so Windows Firewall allows local connections.",
+                    ),
+                    guide_step_row(
+                        "2",
+                        "Open Mewtion-Android on Your Phone",
+                        "Turn off Mobile Data briefly before opening the app (so Android displays your 192.168.x.x Wi-Fi IP instead of your cellular IP), or simply use 'Auto-Find Phone'.",
+                    ),
+                    guide_step_row(
+                        "3",
+                        "Click 'Auto-Find Phone' or Enter the IP in Connection",
+                        "Mewtion scans your local Wi-Fi subnet for port 8765 and connects automatically.",
+                    ),
+                    row![
+                        button(
+                            text("Auto-Find Phone on Wi-Fi")
+                                .font(FONT_SEGOE_SEMIBOLD)
+                                .size(12)
+                                .color(ACCENT_DARK_TEXT)
+                        )
+                        .on_press(Message::AutoDetectPhone)
+                        .padding([7, 16])
+                        .style(accent_button_style),
+                        button(
+                            text("Go to Connection Tab →")
+                                .size(12)
+                                .color(TEXT_PRIMARY)
+                        )
+                        .on_press(Message::TabSelected(NavTab::Connection))
+                        .padding([7, 14])
+                        .style(secondary_button_style),
+                    ]
+                    .spacing(10),
+                ]
+                .spacing(14)
+                .into(),
+            ),
+            GuideMethod::Usb => settings_card(
+                column![
+                    guide_step_row(
+                        "1",
+                        "Enable USB Debugging on Your Android Phone",
+                        "Open Settings → About Phone and tap 'Build Number' 7 times. Then open Settings → System → Developer Options and turn on 'USB Debugging'.",
+                    ),
+                    guide_step_row(
+                        "2",
+                        "Install Google SDK Platform-Tools (ADB) on Windows",
+                        "Download and extract platform-tools to your Downloads folder (or run 'winget install Google.PlatformTools' in Terminal).",
+                    ),
+                    guide_step_row(
+                        "3",
+                        "Plug in USB Cable & Click 'Activate USB Mode'",
+                        "Tap 'Allow USB Debugging' on your phone prompt, open Mewtion-Android, and click 'Activate USB Mode' below.",
+                    ),
+                    row![
+                        button(
+                            text("USB Debugging Guide ↗")
+                                .size(12)
+                                .color(TEXT_PRIMARY)
+                        )
+                        .on_press(Message::OpenUrl(
+                            "https://developer.android.com/studio/debug/dev-options"
+                        ))
+                        .padding([7, 12])
+                        .style(secondary_button_style),
+                        button(
+                            text("Download ADB Tools ↗")
+                                .size(12)
+                                .color(TEXT_PRIMARY)
+                        )
+                        .on_press(Message::OpenUrl(
+                            "https://developer.android.com/tools/releases/platform-tools"
+                        ))
+                        .padding([7, 12])
+                        .style(secondary_button_style),
+                        button(
+                            text("Activate USB Mode (127.0.0.1)")
+                                .font(FONT_SEGOE_SEMIBOLD)
+                                .size(12)
+                                .color(ACCENT_DARK_TEXT)
+                        )
+                        .on_press(Message::SetUsbMode)
+                        .padding([7, 14])
+                        .style(accent_button_style),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(14)
+                .into(),
+            ),
+        };
+
+        column![method_tabs, method_card].spacing(12).into()
+    }
+
+    fn sidebar_item(&self, tab: NavTab, label: &'static str) -> Element<'_, Message> {
+        let is_active = self.active_tab == tab;
+        let indicator = container(text(""))
+            .width(Length::Fixed(3.0))
+            .height(Length::Fixed(16.0))
+            .style(move |_| container::Style {
+                background: Some(
+                    if is_active {
+                        ACCENT_BLUE
+                    } else {
+                        Color::TRANSPARENT
+                    }
+                    .into(),
+                ),
+                border: Border {
+                    radius: 1.5.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
         button(
-            container(
+            row![
+                indicator,
                 text(label)
-                    .font(if is_selected {
+                    .font(if is_active {
                         FONT_SEGOE_SEMIBOLD
                     } else {
                         FONT_SEGOE
                     })
-                    .size(12)
-                    .color(if is_selected {
-                        WIN_ACCENT_DARK_TEXT
+                    .size(13)
+                    .color(if is_active {
+                        TEXT_PRIMARY
                     } else {
-                        WIN_TEXT_PRIMARY
+                        TEXT_SECONDARY
                     }),
-            )
-            .width(Length::Fill)
-            .center_x(Length::Fill),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
         )
         .on_press(Message::TabSelected(tab))
         .width(Length::Fill)
-        .padding([7, 8])
+        .padding([9, 10])
         .style(move |_theme, status| button::Style {
             background: Some(
-                if is_selected {
-                    WIN_ACCENT.into()
+                if is_active {
+                    BG_NAV_ACTIVE.into()
                 } else if status == button::Status::Hovered {
-                    WIN_INPUT_HOVER.into()
+                    BG_CARD.into()
                 } else {
                     Color::TRANSPARENT.into()
                 },
@@ -1677,46 +2042,34 @@ impl SettingsApp {
         .into()
     }
 
-    fn segmented_size_button(&self, size: DotSize) -> Element<'_, Message> {
-        let is_selected = self.selected_size == size;
-        let label = match size {
-            DotSize::Small => "Small",
-            DotSize::Medium => "Medium",
-            DotSize::Large => "Large",
-        };
-        button(
-            text(label)
-                .size(12)
-                .color(if is_selected {
-                    WIN_ACCENT_DARK_TEXT
-                } else {
-                    WIN_TEXT_PRIMARY
-                }),
-        )
-        .on_press(Message::SizeSelected(size))
-        .padding([6, 12])
-        .style(move |_theme, status| button::Style {
-            background: Some(
-                if is_selected {
-                    WIN_ACCENT.into()
-                } else if status == button::Status::Hovered {
-                    WIN_INPUT_HOVER.into()
-                } else {
-                    WIN_INPUT_BG.into()
-                },
-            ),
-            border: Border {
-                radius: 6.0.into(),
-                width: 1.0,
-                color: if is_selected {
-                    WIN_ACCENT
-                } else {
-                    WIN_CARD_BORDER
-                },
-            },
-            ..Default::default()
-        })
-        .into()
+    fn source_pill(&self, val: SensorSourcePref, label: &'static str) -> Element<'_, Message> {
+        let active = self.sensor_source == val;
+        pill_button(label, active, Message::SensorSourceChanged(val))
+    }
+
+    fn size_pill(&self, val: DotSize, label: &'static str) -> Element<'_, Message> {
+        let active = self.selected_size == val;
+        pill_button(label, active, Message::SizeSelected(val))
+    }
+
+    fn anim_pill(&self, val: AnimMode, label: &'static str) -> Element<'_, Message> {
+        let active = self.anim_mode == val;
+        pill_button(label, active, Message::AnimModeChanged(val))
+    }
+
+    fn monitor_pill(&self, val: MonitorTarget, label: &'static str) -> Element<'_, Message> {
+        let active = self.monitor_target == val;
+        pill_button(label, active, Message::MonitorTargetChanged(val))
+    }
+
+    fn orient_pill(&self, val: Orientation, label: &'static str) -> Element<'_, Message> {
+        let active = self.orientation == val;
+        pill_button(label, active, Message::OrientationChanged(val))
+    }
+
+    fn guide_method_pill(&self, val: GuideMethod, label: &'static str) -> Element<'_, Message> {
+        let active = self.guide_method == val;
+        pill_button(label, active, Message::GuideMethodSelected(val))
     }
 
     fn color_swatch(&self, color: DotColor) -> Element<'_, Message> {
@@ -1737,9 +2090,9 @@ impl SettingsApp {
                         1.0
                     },
                     color: if is_selected {
-                        WIN_ACCENT
+                        ACCENT_BLUE
                     } else {
-                        WIN_CARD_BORDER
+                        BORDER_CONTROL
                     },
                 },
                 ..Default::default()
@@ -1748,112 +2101,219 @@ impl SettingsApp {
     }
 }
 
-// === Fluent / WinUI 3 Layout & Style Helpers ===
+// === WinUI 3 Component Helpers ===
 
-fn fluent_card(content: Element<'_, Message>) -> Element<'_, Message> {
+fn settings_card(content: Element<'_, Message>) -> Element<'_, Message> {
     container(content)
         .width(Length::Fill)
-        .padding(14)
+        .padding([14, 18])
         .style(|_| container::Style {
-            background: Some(WIN_CARD_BG.into()),
+            background: Some(BG_CARD.into()),
             border: Border {
                 radius: 8.0.into(),
                 width: 1.0,
-                color: WIN_CARD_BORDER,
+                color: BORDER_CARD,
             },
             ..Default::default()
         })
         .into()
 }
 
-fn divider() -> Element<'static, Message> {
-    container(text(""))
-        .width(Length::Fill)
-        .height(Length::Fixed(1.0))
-        .style(|_| container::Style {
-            background: Some(WIN_DIVIDER.into()),
-            ..Default::default()
-        })
-        .into()
-}
-
-fn setting_row<'a>(
+fn settings_row_card<'a>(
     title: &'static str,
-    subtitle: &'static str,
+    subtitle: &'a str,
     control: Element<'a, Message>,
 ) -> Element<'a, Message> {
-    row![
-        column![
-            text(title)
-                .font(FONT_SEGOE_SEMIBOLD)
-                .size(13)
-                .color(WIN_TEXT_PRIMARY),
-            text(subtitle).size(11).color(WIN_TEXT_SECONDARY),
-        ]
-        .spacing(2)
-        .width(Length::Fill),
-        control,
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center)
-    .into()
-}
-
-fn slider_setting_row<'a>(
-    title: &'static str,
-    subtitle: &'static str,
-    badge: String,
-    slider_el: Element<'a, Message>,
-) -> Element<'a, Message> {
-    column![
+    settings_card(
         row![
             column![
                 text(title)
                     .font(FONT_SEGOE_SEMIBOLD)
                     .size(13)
-                    .color(WIN_TEXT_PRIMARY),
-                text(subtitle).size(11).color(WIN_TEXT_SECONDARY),
+                    .color(TEXT_PRIMARY),
+                text(subtitle).size(11).color(TEXT_SECONDARY),
             ]
             .spacing(2)
             .width(Length::Fill),
-            container(
-                text(badge)
-                    .font(FONT_SEGOE_SEMIBOLD)
-                    .size(12)
-                    .color(WIN_ACCENT)
-            )
-            .padding([3, 8])
-            .style(|_| container::Style {
-                background: Some(WIN_CARD_HEADER.into()),
-                border: Border {
-                    radius: 4.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
+            control,
         ]
-        .align_y(Alignment::Center),
-        slider_el,
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .into(),
+    )
+}
+
+fn slider_card<'a>(
+    title: &'static str,
+    subtitle: &'static str,
+    badge: String,
+    slider_el: Element<'a, Message>,
+) -> Element<'a, Message> {
+    settings_card(
+        row![
+            column![
+                text(title)
+                    .font(FONT_SEGOE_SEMIBOLD)
+                    .size(13)
+                    .color(TEXT_PRIMARY),
+                text(subtitle).size(11).color(TEXT_SECONDARY),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            row![
+                container(
+                    text(badge)
+                        .font(FONT_SEGOE_SEMIBOLD)
+                        .size(12)
+                        .color(ACCENT_BLUE)
+                )
+                .padding([3, 8])
+                .style(|_| container::Style {
+                    background: Some(BG_CONTENT.into()),
+                    border: Border {
+                        radius: 4.0.into(),
+                        width: 1.0,
+                        color: BORDER_CARD,
+                    },
+                    ..Default::default()
+                }),
+                slider_el,
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .into(),
+    )
+}
+
+fn guide_step_row<'a>(
+    num: &'static str,
+    title: &'static str,
+    desc: &'static str,
+) -> Element<'a, Message> {
+    row![
+        container(
+            text(num)
+                .font(FONT_SEGOE_SEMIBOLD)
+                .size(12)
+                .color(ACCENT_BLUE)
+        )
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(24.0))
+        .center_x(Length::Fixed(24.0))
+        .center_y(Length::Fixed(24.0))
+        .style(|_| container::Style {
+            background: Some(BG_CONTENT.into()),
+            border: Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: BORDER_CONTROL,
+            },
+            ..Default::default()
+        }),
+        column![
+            text(title)
+                .font(FONT_SEGOE_SEMIBOLD)
+                .size(13)
+                .color(TEXT_PRIMARY),
+            text(desc).size(11).color(TEXT_SECONDARY),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
     ]
-    .spacing(8)
+    .spacing(12)
+    .align_y(Alignment::Start)
     .into()
 }
 
-fn subtle_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+fn segmented_container(content: Element<'_, Message>) -> Element<'_, Message> {
+    container(content)
+        .padding(3)
+        .style(|_| container::Style {
+            background: Some(BG_CONTENT.into()),
+            border: Border {
+                radius: 7.0.into(),
+                width: 1.0,
+                color: BORDER_CARD,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn pill_button<'a>(label: &'static str, active: bool, msg: Message) -> Element<'a, Message> {
+    button(
+        text(label)
+            .font(if active {
+                FONT_SEGOE_SEMIBOLD
+            } else {
+                FONT_SEGOE
+            })
+            .size(12)
+            .color(if active {
+                ACCENT_DARK_TEXT
+            } else {
+                TEXT_SECONDARY
+            }),
+    )
+    .on_press(msg)
+    .padding([5, 11])
+    .style(move |_theme, status| button::Style {
+        background: Some(
+            if active {
+                ACCENT_BLUE.into()
+            } else if status == button::Status::Hovered {
+                BG_CONTROL_HOVER.into()
+            } else {
+                Color::TRANSPARENT.into()
+            },
+        ),
+        border: Border {
+            radius: 5.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+fn secondary_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: Some(
             match status {
-                button::Status::Hovered => WIN_INPUT_HOVER,
-                button::Status::Pressed => WIN_CARD_HEADER,
-                _ => WIN_INPUT_BG,
+                button::Status::Hovered => BG_CONTROL_HOVER,
+                button::Status::Pressed => BG_CARD,
+                _ => BG_CONTROL,
             }
             .into(),
         ),
-        text_color: WIN_TEXT_PRIMARY,
+        text_color: TEXT_PRIMARY,
         border: Border {
             radius: 6.0.into(),
             width: 1.0,
-            color: WIN_CARD_BORDER,
+            color: BORDER_CONTROL,
+        },
+        ..Default::default()
+    }
+}
+
+fn ghost_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(
+            match status {
+                button::Status::Hovered => BG_CONTROL,
+                _ => Color::TRANSPARENT,
+            }
+            .into(),
+        ),
+        text_color: TEXT_SECONDARY,
+        border: Border {
+            radius: 5.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
         },
         ..Default::default()
     }
@@ -1863,16 +2323,16 @@ fn accent_button_style(_theme: &Theme, status: button::Status) -> button::Style 
     button::Style {
         background: Some(
             match status {
-                button::Status::Hovered => WIN_ACCENT_HOVER,
-                _ => WIN_ACCENT,
+                button::Status::Hovered => ACCENT_BLUE_HOVER,
+                _ => ACCENT_BLUE,
             }
             .into(),
         ),
-        text_color: WIN_ACCENT_DARK_TEXT,
+        text_color: ACCENT_DARK_TEXT,
         border: Border {
             radius: 6.0.into(),
             width: 1.0,
-            color: WIN_ACCENT,
+            color: ACCENT_BLUE,
         },
         ..Default::default()
     }
@@ -1889,29 +2349,29 @@ fn fluent_toggler_style(_theme: &Theme, status: toggler::Status) -> toggler::Sty
     toggler::Style {
         background: Background::Color(if is_toggled {
             if is_hovered {
-                WIN_ACCENT_HOVER
+                ACCENT_BLUE_HOVER
             } else {
-                WIN_ACCENT
+                ACCENT_BLUE
             }
         } else if is_hovered {
-            WIN_INPUT_HOVER
+            BG_CONTROL_HOVER
         } else {
-            WIN_INPUT_BG
+            BG_CONTENT
         }),
         background_border_width: 1.0,
         background_border_color: if is_toggled {
-            WIN_ACCENT
+            ACCENT_BLUE
         } else {
-            WIN_TEXT_SECONDARY
+            BORDER_CONTROL
         },
         foreground: Background::Color(if is_toggled {
-            WIN_ACCENT_DARK_TEXT
+            ACCENT_DARK_TEXT
         } else {
-            WIN_TEXT_PRIMARY
+            TEXT_PRIMARY
         }),
         foreground_border_width: 0.0,
         foreground_border_color: Color::TRANSPARENT,
-        text_color: Some(WIN_TEXT_PRIMARY),
+        text_color: Some(TEXT_PRIMARY),
         border_radius: None,
         padding_ratio: 0.22,
     }
@@ -1919,14 +2379,14 @@ fn fluent_toggler_style(_theme: &Theme, status: toggler::Status) -> toggler::Sty
 
 fn fluent_slider_style(_theme: &Theme, status: slider::Status) -> slider::Style {
     let handle_color = match status {
-        slider::Status::Hovered | slider::Status::Dragged => WIN_ACCENT_HOVER,
-        slider::Status::Active => WIN_ACCENT,
+        slider::Status::Hovered | slider::Status::Dragged => ACCENT_BLUE_HOVER,
+        slider::Status::Active => ACCENT_BLUE,
     };
     slider::Style {
         rail: slider::Rail {
             backgrounds: (
-                Background::Color(WIN_ACCENT),
-                Background::Color(WIN_CARD_BORDER),
+                Background::Color(ACCENT_BLUE),
+                Background::Color(BORDER_CONTROL),
             ),
             width: 4.0,
             border: Border {
@@ -1936,36 +2396,10 @@ fn fluent_slider_style(_theme: &Theme, status: slider::Status) -> slider::Style 
             },
         },
         handle: slider::Handle {
-            shape: slider::HandleShape::Circle { radius: 8.5 },
+            shape: slider::HandleShape::Circle { radius: 8.0 },
             background: Background::Color(handle_color),
-            border_width: 3.0,
-            border_color: WIN_CARD_BG,
-        },
-    }
-}
-
-fn fluent_pick_list_style(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
-    let is_active = matches!(
-        status,
-        pick_list::Status::Hovered | pick_list::Status::Opened { .. }
-    );
-    pick_list::Style {
-        text_color: WIN_TEXT_PRIMARY,
-        placeholder_color: WIN_TEXT_SECONDARY,
-        handle_color: WIN_TEXT_SECONDARY,
-        background: Background::Color(if is_active {
-            WIN_INPUT_HOVER
-        } else {
-            WIN_INPUT_BG
-        }),
-        border: Border {
-            radius: 6.0.into(),
-            width: 1.0,
-            color: if is_active {
-                WIN_ACCENT
-            } else {
-                WIN_CARD_BORDER
-            },
+            border_width: 2.5,
+            border_color: BG_CARD,
         },
     }
 }
@@ -1975,22 +2409,22 @@ fn fluent_text_input_style(_theme: &Theme, status: text_input::Status) -> text_i
     let is_hovered = matches!(status, text_input::Status::Hovered);
     text_input::Style {
         background: Background::Color(if is_hovered || is_focused {
-            WIN_INPUT_HOVER
+            BG_CONTROL_HOVER
         } else {
-            WIN_INPUT_BG
+            BG_CONTENT
         }),
         border: Border {
             radius: 6.0.into(),
             width: if is_focused { 1.5 } else { 1.0 },
             color: if is_focused {
-                WIN_ACCENT
+                ACCENT_BLUE
             } else {
-                WIN_CARD_BORDER
+                BORDER_CONTROL
             },
         },
-        icon: WIN_TEXT_SECONDARY,
-        placeholder: WIN_TEXT_SECONDARY,
-        value: WIN_TEXT_PRIMARY,
-        selection: WIN_ACCENT,
+        icon: TEXT_SECONDARY,
+        placeholder: TEXT_MUTED,
+        value: TEXT_PRIMARY,
+        selection: ACCENT_BLUE,
     }
 }

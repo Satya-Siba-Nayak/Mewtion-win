@@ -68,42 +68,51 @@ pub fn sanitize_ip(raw: &str) -> String {
 }
 
 impl MewtionConfig {
-    /// Resolves `mewtion_config.txt` in the current working directory if present,
-    /// otherwise next to the running executable so double-clicking in Windows
-    /// File Explorer always shares the same config between `Mewtion.exe` and `control_panel.exe`.
-    pub fn config_path() -> PathBuf {
-        let cwd_path = PathBuf::from("mewtion_config.txt");
-        if cwd_path.exists() {
-            return cwd_path;
+    /// Returns a writable application data directory (`%LOCALAPPDATA%\Mewtion` on Windows)
+    /// so `Mewtion.exe` and `control_panel.exe` always share the same writable config and
+    /// status files even when installed into `C:\Program Files\Mewtion`.
+    pub fn app_data_dir() -> PathBuf {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA").or_else(|_| std::env::var("APPDATA")) {
+            let dir = PathBuf::from(local_app_data).join("Mewtion");
+            if fs::create_dir_all(&dir).is_ok() {
+                return dir;
+            }
         }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                let exe_cfg = dir.join("mewtion_config.txt");
-                if exe_cfg.exists() {
-                    return exe_cfg;
-                }
-                if let Some(parent) = dir.parent() {
-                    let parent_cfg = parent.join("mewtion_config.txt");
-                    if parent_cfg.exists() {
-                        return parent_cfg;
-                    }
-                }
-                return exe_cfg;
+                return dir.to_path_buf();
             }
         }
-        cwd_path
+        PathBuf::from(".")
     }
 
-    /// Resolves `mewtion_status.txt` next to `mewtion_config.txt` for live status
-    /// reporting from the overlay process to the Control Panel GUI.
-    pub fn status_path() -> PathBuf {
-        let cfg = Self::config_path();
-        if let Some(parent) = cfg.parent() {
-            if !parent.as_os_str().is_empty() {
-                return parent.join("mewtion_status.txt");
+    pub fn config_path() -> PathBuf {
+        let dir = Self::app_data_dir();
+        let cfg_path = dir.join("mewtion_config.txt");
+
+        // On first run, seed %LOCALAPPDATA%\Mewtion\mewtion_config.txt from the bundled config if present
+        if !cfg_path.exists() {
+            let seed_candidates = [
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("mewtion_config.txt"))),
+                Some(PathBuf::from("mewtion_config.txt")),
+            ];
+            for cand in seed_candidates.into_iter().flatten() {
+                if cand.exists() && cand != cfg_path {
+                    let _ = fs::copy(&cand, &cfg_path);
+                    break;
+                }
             }
         }
-        PathBuf::from("mewtion_status.txt")
+
+        cfg_path
+    }
+
+    /// Resolves `mewtion_status.txt` in `%LOCALAPPDATA%\Mewtion` for live status
+    /// reporting from the overlay process to the Control Panel GUI.
+    pub fn status_path() -> PathBuf {
+        Self::app_data_dir().join("mewtion_status.txt")
     }
 
     pub fn load() -> Self {

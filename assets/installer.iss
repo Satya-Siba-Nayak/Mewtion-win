@@ -54,7 +54,7 @@ Name: "{autodesktop}\Mewtion"; Filename: "{app}\control_panel.exe"; WorkingDir: 
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Mewtion"; ValueData: """{app}\Mewtion.exe"""; Flags: uninsdeletevalue; Tasks: startup
 
 [Run]
-Filename: "{app}\control_panel.exe"; Description: "Launch Mewtion"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\control_panel.exe"; WorkingDir: "{app}"; Description: "Launch Mewtion"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "taskkill.exe"; Parameters: "/F /IM Mewtion.exe"; Flags: runhidden; RunOnceId: "StopMewtionOverlay"

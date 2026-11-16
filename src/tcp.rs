@@ -107,7 +107,13 @@ where
             }
             Err(_) => {
                 write_status(&format!("Waiting for Phone at {target_address}..."));
-                sleep(Duration::from_millis(800));
+                for _ in 0..4 {
+                    sleep(Duration::from_millis(200));
+                    let latest_ip = sanitize_ip(&ip_ref.lock().unwrap());
+                    if latest_ip != target_ip {
+                        break;
+                    }
+                }
             }
         }
     }
