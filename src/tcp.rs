@@ -1,4 +1,4 @@
-use crate::config::MewtionConfig;
+use crate::config::{sanitize_ip, MewtionConfig};
 use crate::sensor::MotionSample;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -9,23 +9,52 @@ use std::time::Duration;
 
 pub fn parse_sample_line(line: &str) -> Option<MotionSample> {
     let parts: Vec<&str> = line.trim().split(',').collect();
-    if parts.len() != 6 {
-        return None;
+    if parts.len() == 6 {
+        let parse_f32 = |s: &str| -> Option<f32> {
+            let cleaned = s.trim();
+            cleaned
+                .parse::<f32>()
+                .ok()
+                .or_else(|| cleaned.replace(',', ".").parse::<f32>().ok())
+        };
+        let ax = parse_f32(parts[0])?;
+        let ay = parse_f32(parts[1])?;
+        let az = parse_f32(parts[2])?;
+        let gx = parse_f32(parts[3])?;
+        let gy = parse_f32(parts[4])?;
+        let gz = parse_f32(parts[5])?;
+        Some(MotionSample {
+            ax,
+            ay,
+            az,
+            gx,
+            gy,
+            gz,
+        })
+    } else if parts.len() == 12 {
+        // Mewtion-Android uses String.format("%.3f,...") without Locale.US, which formats
+        // decimals with commas on European/non-US phone locales (12 comma-separated tokens).
+        let parse_pair = |int_part: &str, frac_part: &str| -> Option<f32> {
+            let combined = format!("{}.{}", int_part.trim(), frac_part.trim());
+            combined.parse::<f32>().ok()
+        };
+        let ax = parse_pair(parts[0], parts[1])?;
+        let ay = parse_pair(parts[2], parts[3])?;
+        let az = parse_pair(parts[4], parts[5])?;
+        let gx = parse_pair(parts[6], parts[7])?;
+        let gy = parse_pair(parts[8], parts[9])?;
+        let gz = parse_pair(parts[10], parts[11])?;
+        Some(MotionSample {
+            ax,
+            ay,
+            az,
+            gx,
+            gy,
+            gz,
+        })
+    } else {
+        None
     }
-    let ax = parts[0].trim().parse::<f32>().ok()?;
-    let ay = parts[1].trim().parse::<f32>().ok()?;
-    let az = parts[2].trim().parse::<f32>().ok()?;
-    let gx = parts[3].trim().parse::<f32>().ok()?;
-    let gy = parts[4].trim().parse::<f32>().ok()?;
-    let gz = parts[5].trim().parse::<f32>().ok()?;
-    Some(MotionSample {
-        ax,
-        ay,
-        az,
-        gx,
-        gy,
-        gz,
-    })
 }
 
 fn write_status(status: &str) {
@@ -39,7 +68,7 @@ where
     loop {
         let target_ip = {
             let ip = ip_ref.lock().unwrap();
-            ip.clone()
+            sanitize_ip(&ip)
         };
         let target_address = format!("{target_ip}:8765");
 
@@ -47,13 +76,14 @@ where
             .to_socket_addrs()
             .ok()
             .and_then(|mut addrs| addrs.next())
-            .map(|addr: SocketAddr| TcpStream::connect_timeout(&addr, Duration::from_millis(1500)))
+            .map(|addr: SocketAddr| TcpStream::connect_timeout(&addr, Duration::from_millis(1200)))
             .unwrap_or_else(|| TcpStream::connect(&target_address));
 
         match connect_result {
             Ok(stream) => {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                write_status(&format!("Connected to companion app ({target_address})"));
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
+                let _ = stream.set_nodelay(true);
+                write_status(&format!("Connected to Phone ({target_address})"));
 
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
@@ -68,7 +98,7 @@ where
                     line.clear();
 
                     // Reconnect immediately if the user changed the target IP in Settings
-                    let latest_ip = ip_ref.lock().unwrap().clone();
+                    let latest_ip = sanitize_ip(&ip_ref.lock().unwrap());
                     if latest_ip != target_ip {
                         break;
                     }
@@ -76,8 +106,8 @@ where
                 write_status(&format!("Disconnected — waiting for {target_address}..."));
             }
             Err(_) => {
-                write_status(&format!("Waiting for companion app at {target_address}..."));
-                sleep(Duration::from_millis(1000));
+                write_status(&format!("Waiting for Phone at {target_address}..."));
+                sleep(Duration::from_millis(800));
             }
         }
     }

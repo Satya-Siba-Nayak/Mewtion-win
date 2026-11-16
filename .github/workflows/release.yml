@@ -49,7 +49,7 @@ jobs:
       - name: Build release binaries (${{ matrix.arch }})
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package Portable Archive (.zip) & Installer (.exe)
+      - name: Package Installer (.exe) & Advanced Portable Folder
         shell: pwsh
         run: |
           $RawTag = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "v0.1.0" }
@@ -58,19 +58,19 @@ jobs:
           $Target = "${{ matrix.target }}"
           $PkgName = "Mewtion-$RawTag-windows-$Arch"
           $DistDir = "dist/$PkgName"
+          $AdvDir = "$DistDir/Advanced"
 
-          New-Item -ItemType Directory -Force -Path "$DistDir/assets" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$AdvDir/assets" | Out-Null
 
-          Copy-Item "target/$Target/release/Mewtion.exe" "$DistDir/"
-          Copy-Item "target/$Target/release/control_panel.exe" "$DistDir/"
-          Copy-Item "start.bat" "$DistDir/"
-          Copy-Item "mewtion_config.txt" "$DistDir/"
-          Copy-Item "LICENSE" "$DistDir/"
-          Copy-Item "README.md" "$DistDir/"
-          Copy-Item "assets/dev.mewtion.Overlay.svg" "$DistDir/assets/"
-          Copy-Item "assets/mewtion.ico" "$DistDir/assets/"
-
-          Compress-Archive -Path "$DistDir" -DestinationPath "$PkgName.zip" -Force
+          # Populate Advanced/ with the standalone portable executables & config
+          Copy-Item "target/$Target/release/Mewtion.exe" "$AdvDir/"
+          Copy-Item "target/$Target/release/control_panel.exe" "$AdvDir/"
+          Copy-Item "start.bat" "$AdvDir/"
+          Copy-Item "mewtion_config.txt" "$AdvDir/"
+          Copy-Item "LICENSE" "$AdvDir/"
+          Copy-Item "README.md" "$AdvDir/"
+          Copy-Item "assets/dev.mewtion.Overlay.svg" "$AdvDir/assets/"
+          Copy-Item "assets/mewtion.ico" "$AdvDir/assets/"
 
           # Build Windows Setup Installer (.exe) using Inno Setup (pre-installed on windows-latest)
           $IsccPaths = @(
@@ -79,18 +79,25 @@ jobs:
           )
           $Iscc = $IsccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($Iscc) {
-            & $Iscc "/DMyAppVersion=$CleanVer" "/DMyAppArch=$Arch" "/DSourceDir=..\$DistDir" "assets\installer.iss"
+            & $Iscc "/DMyAppVersion=$CleanVer" "/DMyAppArch=$Arch" "/DSourceDir=..\$AdvDir" "assets\installer.iss"
           } else {
-            Write-Warning "ISCC.exe not found; skipping Setup .exe generation."
+            Write-Error "ISCC.exe not found!"
           }
 
-      - name: Upload Windows Packages (${{ matrix.arch }})
+          # Place the Setup Installer .exe and docs at the root of the package directory
+          # alongside the Advanced/ folder
+          Copy-Item "Mewtion-Setup-$RawTag-windows-$Arch.exe" "$DistDir/"
+          Copy-Item "README.md" "$DistDir/"
+          Copy-Item "LICENSE" "$DistDir/"
+
+          # Create release zip containing Mewtion-Setup-*.exe at root + Advanced/ subfolder
+          Compress-Archive -Path "$DistDir/*" -DestinationPath "$PkgName.zip" -Force
+
+      - name: Upload Windows Package (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
-          name: mewtion-windows-${{ matrix.arch }}
-          path: |
-            Mewtion-*-windows-${{ matrix.arch }}.zip
-            Mewtion-Setup-*-windows-${{ matrix.arch }}.exe
+          name: Mewtion-windows-${{ matrix.arch }}
+          path: dist/Mewtion-*-windows-${{ matrix.arch }}/*
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

@@ -2,8 +2,8 @@
 //!
 //! Replaces the Linux GTK4/GSK `DotView` widget with a lightweight software SDF circle
 //! rasterizer backed by a Win32 premultiplied-BGRA DIB section. Only the dirty bounding
-//! rectangles of the previous frame's dots are cleared each tick, keeping CPU usage
-//! well under 1% at 60 FPS with zero external DLL dependencies.
+//! rectangles of the previous frame's dots are cleared each tick, and stationary frames
+//! skip `UpdateLayeredWindow` entirely so DWM compositing stays at 0% CPU/GPU when idle.
 
 /// A dot to draw: centre x and y, diameter, and alpha — all in screen pixels.
 pub type Dot = (f32, f32, f32, f32);
@@ -36,6 +36,7 @@ pub struct DotView {
     old_obj: HGDIOBJ,
     pixels_ptr: *mut u32,
     dirty_rects: Vec<DirtyRect>,
+    last_frame_hash: u64,
 }
 
 #[cfg(windows)]
@@ -90,6 +91,7 @@ impl DotView {
                 old_obj,
                 pixels_ptr: bits as *mut u32,
                 dirty_rects: Vec::with_capacity(96),
+                last_frame_hash: u64::MAX,
             })
         }
     }
@@ -102,6 +104,30 @@ impl DotView {
         self.height
     }
 
+    /// Computes a fast quantized signature of the frame so we can skip full-screen
+    /// `UpdateLayeredWindow` DWM transfers when the anchor dots are completely still.
+    fn compute_frame_hash(dst_x: i32, dst_y: i32, color: (f32, f32, f32), dots: &[Dot]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut mix = |v: u64| {
+            h ^= v;
+            h = h.wrapping_mul(0x100000001b3);
+        };
+        mix(dst_x as u64);
+        mix(dst_y as u64);
+        mix((color.0 * 255.0) as u64);
+        mix((color.1 * 255.0) as u64);
+        mix((color.2 * 255.0) as u64);
+        mix(dots.len() as u64);
+        for &(x, y, sz, a) in dots {
+            // Quantize to 1/4 pixel and 1/255 alpha
+            mix((x * 4.0) as i32 as u64);
+            mix((y * 4.0) as i32 as u64);
+            mix((sz * 4.0) as i32 as u64);
+            mix((a * 255.0) as i32 as u64);
+        }
+        h
+    }
+
     /// Rasterizes anti-aliased circles for `dots` and pushes the updated layer to `hwnd`.
     pub fn render(
         &mut self,
@@ -111,6 +137,12 @@ impl DotView {
         color: (f32, f32, f32),
         dots: &[Dot],
     ) {
+        let frame_hash = Self::compute_frame_hash(dst_x, dst_y, color, dots);
+        if frame_hash == self.last_frame_hash {
+            return;
+        }
+        self.last_frame_hash = frame_hash;
+
         let w = self.width;
         let h = self.height;
         let stride = w as usize;

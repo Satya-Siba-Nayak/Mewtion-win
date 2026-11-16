@@ -10,6 +10,8 @@ pub struct MewtionConfig {
     pub sensitivity: f64,
     pub animation_mode: String,
     pub phone_ip: String,
+    /// `"Auto"`, `"Phone"`, or `"BuiltIn"`.
+    pub sensor_source: String,
     /// `"Primary"` for the primary display, or `"All"` to span the entire virtual desktop.
     pub monitor_mode: String,
     /// Sensor orientation in degrees clockwise: `0`, `90`, `180`, or `270`.
@@ -31,12 +33,37 @@ impl Default for MewtionConfig {
             sensitivity: 3.5,
             animation_mode: "Fluid".to_string(),
             phone_ip: "127.0.0.1".to_string(), // Defaults to USB (ADB port-forward)
+            sensor_source: "Auto".to_string(),
             monitor_mode: "Primary".to_string(),
             orientation_deg: 0,
             invert_x: false,
             invert_y: false,
             simulate_motion: false,
         }
+    }
+}
+
+/// Strips any accidental `http://`, `tcp://`, or `:8765` port suffix from a user-entered IP string.
+pub fn sanitize_ip(raw: &str) -> String {
+    let mut s = raw.trim();
+    if let Some(rest) = s.strip_prefix("http://") {
+        s = rest;
+    } else if let Some(rest) = s.strip_prefix("https://") {
+        s = rest;
+    } else if let Some(rest) = s.strip_prefix("tcp://") {
+        s = rest;
+    }
+    s = s.trim_end_matches('/');
+    if let Some((host, _port)) = s.split_once(':') {
+        let host = host.trim();
+        if !host.is_empty() {
+            return host.to_string();
+        }
+    }
+    if s.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        s.to_string()
     }
 }
 
@@ -130,7 +157,8 @@ impl MewtionConfig {
                     }
                 }
                 "animation" => self.animation_mode = value.to_string(),
-                "ip" => self.phone_ip = value.to_string(),
+                "ip" => self.phone_ip = sanitize_ip(value),
+                "source" => self.sensor_source = value.to_string(),
                 "monitor" => self.monitor_mode = value.to_string(),
                 "orientation" => {
                     if let Ok(v) = value.parse::<i32>() {
@@ -199,10 +227,17 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_ip() {
+        assert_eq!(sanitize_ip("192.168.1.42:8765"), "192.168.1.42");
+        assert_eq!(sanitize_ip("  http://192.168.43.1:8765/ "), "192.168.43.1");
+        assert_eq!(sanitize_ip("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
     fn test_apply_str_and_transform() {
         let mut cfg = MewtionConfig::default();
         cfg.apply_str(
-            "size=24\ncolor=#007aff\nopacity=0.5\nmargin=0.08\nsensitivity=5.0\nanimation=Rigid\nip=192.168.43.1\nmonitor=All\norientation=90\ninvert_x=true\ninvert_y=false\nsimulate=true\n",
+            "size=24\ncolor=#007aff\nopacity=0.5\nmargin=0.08\nsensitivity=5.0\nanimation=Rigid\nip=192.168.43.1:8765\nsource=Phone\nmonitor=All\norientation=90\ninvert_x=true\ninvert_y=false\nsimulate=true\n",
         );
         assert_eq!(cfg.dot_size, 24.0);
         assert_eq!(cfg.opacity, 0.5);
@@ -210,6 +245,7 @@ mod tests {
         assert_eq!(cfg.sensitivity, 5.0);
         assert_eq!(cfg.animation_mode, "Rigid");
         assert_eq!(cfg.phone_ip, "192.168.43.1");
+        assert_eq!(cfg.sensor_source, "Phone");
         assert_eq!(cfg.monitor_mode, "All");
         assert_eq!(cfg.orientation_deg, 90);
         assert!(cfg.invert_x);

@@ -10,7 +10,6 @@ use config::MewtionConfig;
 #[cfg(windows)]
 use dotview::DotView;
 use sensor::MotionSample;
-use std::fs;
 use std::sync::{Arc, Mutex};
 
 struct Rng {
@@ -37,6 +36,12 @@ struct Particle {
     is_anchor: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SampleOrigin {
+    PhoneTcp,
+    WinSensor,
+}
+
 struct AppState {
     target_x: f64,
     target_y: f64,
@@ -47,10 +52,13 @@ struct AppState {
     config: MewtionConfig,
     tick_count: u32,
     paused: bool,
+    was_simulating: bool,
+    last_phone_sample_tick: Option<u32>,
 }
 
 impl AppState {
     fn new(config: MewtionConfig) -> Self {
+        let was_simulating = config.simulate_motion;
         Self {
             target_x: 0.0,
             target_y: 0.0,
@@ -61,12 +69,22 @@ impl AppState {
             config,
             tick_count: 0,
             paused: false,
+            was_simulating,
+            last_phone_sample_tick: None,
         }
+    }
+
+    fn stop_simulation_immediately(&mut self) {
+        self.target_x = 0.0;
+        self.target_y = 0.0;
+        self.current_x = 0.0;
+        self.current_y = 0.0;
+        self.particles.retain(|p| p.is_anchor);
     }
 
     fn step(
         &mut self,
-        receiver: &std::sync::mpsc::Receiver<MotionSample>,
+        receiver: &std::sync::mpsc::Receiver<(SampleOrigin, MotionSample)>,
         shared_ip: &Arc<Mutex<String>>,
         width: f64,
         height: f64,
@@ -74,21 +92,56 @@ impl AppState {
         const GYRO_YAW_WEIGHT: f32 = 0.8;
 
         self.tick_count = self.tick_count.wrapping_add(1);
-        if self.tick_count % 60 == 0 {
+        // Reload config every 10 ticks (~160 ms) for near-instant UI responsiveness
+        if self.tick_count % 10 == 0 {
             self.config = MewtionConfig::load();
 
             // Push any IP changes live to the network thread
             if let Ok(mut locked_ip) = shared_ip.lock() {
-                *locked_ip = self.config.phone_ip.clone();
+                if *locked_ip != self.config.phone_ip {
+                    *locked_ip = self.config.phone_ip.clone();
+                }
             }
         }
 
-        let current_sens = (self.config.sensitivity as f32).max(0.1);
+        // If Simulate Motion was just turned off, immediately stop motion and clear flying dots
+        if self.was_simulating && !self.config.simulate_motion {
+            self.stop_simulation_immediately();
+        }
+        self.was_simulating = self.config.simulate_motion;
 
-        while let Ok(sample) = receiver.try_recv() {
+        let current_sens = (self.config.sensitivity as f32).max(0.1);
+        let mut received_sample = false;
+
+        while let Ok((origin, sample)) = receiver.try_recv() {
+            if origin == SampleOrigin::PhoneTcp {
+                self.last_phone_sample_tick = Some(self.tick_count);
+            }
+
             if self.config.simulate_motion {
                 continue;
             }
+
+            // Respect user's sensor_source preference ("Auto", "Phone", "BuiltIn")
+            let src_pref = self.config.sensor_source.as_str();
+            if src_pref.eq_ignore_ascii_case("Phone") && origin != SampleOrigin::PhoneTcp {
+                continue;
+            }
+            if src_pref.eq_ignore_ascii_case("BuiltIn") && origin != SampleOrigin::WinSensor {
+                continue;
+            }
+            // In "Auto" mode, if a phone sent a sample within the last ~2 seconds (120 ticks),
+            // ignore built-in sensor readings so a stationary laptop sensor never overrides the phone.
+            if origin == SampleOrigin::WinSensor {
+                if let Some(last_tick) = self.last_phone_sample_tick {
+                    if self.tick_count.wrapping_sub(last_tick) < 120 {
+                        continue;
+                    }
+                }
+            }
+
+            received_sample = true;
+
             // Clamp tiny sensor fluctuations to exactly 0.0 to prevent drifting
             // when the device or phone is completely still on a table.
             let mut ax = sample.ax;
@@ -122,6 +175,17 @@ impl AppState {
             let (tx, ty) = self.config.transform_axes(sim_ax, sim_ay);
             self.target_x = ((tx / current_sens) as f64).clamp(-1.0, 1.0);
             self.target_y = ((ty / current_sens) as f64).clamp(-1.0, 1.0);
+        } else if !received_sample {
+            // Gently decay target toward 0 when no new sample arrived this tick
+            // so a disconnected sensor never leaves dots drifting indefinitely.
+            self.target_x *= 0.90;
+            self.target_y *= 0.90;
+            if self.target_x.abs() < 0.005 {
+                self.target_x = 0.0;
+            }
+            if self.target_y.abs() < 0.005 {
+                self.target_y = 0.0;
+            }
         }
 
         if self.paused {
@@ -129,8 +193,8 @@ impl AppState {
             return ((r as f32, g as f32, b as f32), Vec::new());
         }
 
-        self.current_x += (self.target_x - self.current_x) * 0.05;
-        self.current_y += (self.target_y - self.current_y) * 0.05;
+        self.current_x += (self.target_x - self.current_x) * 0.08;
+        self.current_y += (self.target_y - self.current_y) * 0.08;
 
         let speed = (self.current_x.powi(2) + self.current_y.powi(2)).sqrt();
         let is_moving = speed > 0.02;
@@ -481,28 +545,26 @@ mod win_app {
             let mut dot_view =
                 DotView::new(screen_w, screen_h).expect("Failed to allocate layered DIB canvas");
 
-            let (sender, receiver) = std::sync::mpsc::channel::<MotionSample>();
+            let (sender, receiver) =
+                std::sync::mpsc::channel::<(SampleOrigin, MotionSample)>();
             let tcp_shared_ip = shared_ip.clone();
+            let tcp_sender = sender.clone();
 
-            // Prefer the machine's built-in Windows sensors; fall back to the Android companion app over TCP.
-            std::thread::spawn(move || match win_sensor::WinSensorSource::discover() {
-                Some(source) => {
+            // Always run the TCP phone bridge thread so connecting an Android phone over
+            // Wi-Fi, Hotspot, or USB (ADB) always works even on laptops with built-in/dummy HID sensors.
+            std::thread::spawn(move || {
+                tcp::run_tcp_bridge_blocking(tcp_shared_ip, move |sample| {
+                    let _ = tcp_sender.send((SampleOrigin::PhoneTcp, sample));
+                });
+            });
+
+            // Also poll built-in Windows sensors if the hardware exposes them.
+            std::thread::spawn(move || {
+                if let Some(source) = win_sensor::WinSensorSource::discover() {
                     let desc = source.describe();
-                    println!("Mewtion: using built-in Windows sensors ({desc})");
-                    let _ = fs::write(
-                        MewtionConfig::status_path(),
-                        format!("Active: Built-in {desc}"),
-                    );
+                    println!("Mewtion: discovered built-in Windows sensors ({desc})");
                     win_sensor::run_win_sensor_blocking(source, move |sample| {
-                        let _ = sender.send(sample);
-                    });
-                }
-                None => {
-                    println!(
-                        "Mewtion: no built-in Windows accelerometer found, waiting for companion app over TCP"
-                    );
-                    tcp::run_tcp_bridge_blocking(tcp_shared_ip, move |sample| {
-                        let _ = sender.send(sample);
+                        let _ = sender.send((SampleOrigin::WinSensor, sample));
                     });
                 }
             });
@@ -540,6 +602,11 @@ mod win_app {
                             }
                             IDM_TOGGLE_SIMULATE => {
                                 state.config.simulate_motion = !state.config.simulate_motion;
+                                state.was_simulating = state.config.simulate_motion;
+                                if !state.config.simulate_motion {
+                                    state.stop_simulation_immediately();
+                                }
+                                let _ = state.config.save();
                             }
                             IDM_EXIT => {
                                 remove_tray_icon(hwnd);
@@ -653,15 +720,22 @@ mod tests {
         let mut cfg = MewtionConfig::default();
         cfg.simulate_motion = true;
         let mut state = AppState::new(cfg);
-        let (_tx, rx) = std::sync::mpsc::channel::<MotionSample>();
+        let (_tx, rx) = std::sync::mpsc::channel::<(SampleOrigin, MotionSample)>();
         let shared_ip = Arc::new(Mutex::new("127.0.0.1".to_string()));
 
         let mut max_dots = 0;
-        for _ in 0..30 {
+        for _ in 0..8 {
             let (_color, dots) = state.step(&rx, &shared_ip, 1920.0, 1080.0);
             max_dots = max_dots.max(dots.len());
         }
         assert!(max_dots > 0, "Expected simulated motion to spawn dots");
+
+        // Turning off simulate_motion should immediately reset velocity and clear non-anchor particles
+        state.config.simulate_motion = false;
+        let (_color, after_stop_dots) = state.step(&rx, &shared_ip, 1920.0, 1080.0);
+        assert_eq!(state.current_x, 0.0);
+        assert_eq!(state.current_y, 0.0);
+        assert!(after_stop_dots.len() <= 20);
 
         state.paused = true;
         let (_color, paused_dots) = state.step(&rx, &shared_ip, 1920.0, 1080.0);
